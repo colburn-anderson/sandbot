@@ -29,12 +29,58 @@
 		3E78A5C12F91B3AD009D2E7D /* SandBotUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SandBotUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
-/* Begin PBXFileSystemSynchronizedRootGroup section */
-		3E78A5AA2F91B3AC009D2E7D /* SandBot */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = SandBot;
-			sourceTree = "<group>";
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		3E78A5E92F91B49D009D2E7D /* Exceptions for "SandBot" folder in "SandBot" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				App/Colors.swift,
+				App/ComposeView.swift,
+				App/ContentView.swift,
+				App/DrawingInstruction.swift,
+				App/HistoryView.swift,
+				App/LiveFeedView.swift,
+				App/MockRobotService.swift,
+				App/RobotService.swift,
+				App/RobotStatusMonitor.swift,
+				App/SandBotApp.swift,
+				App/SettingsView.swift,
+				App/StatusPill.swift,
+				App/Stroke.swift,
+				Assets.xcassets,
+				DrawingHistory.swift,
+				Item.swift,
+				RobotStatus.swift,
+				Typography.swift,
+			);
+			target = 3E78A5A72F91B3AC009D2E7D /* SandBot */;
 		};
+		3E78A5EA2F91B49D009D2E7D /* Exceptions for "SandBot" folder in "SandBotUITests" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				App/Colors.swift,
+				App/ComposeView.swift,
+				App/ContentView.swift,
+				App/DrawingInstruction.swift,
+				App/HistoryView.swift,
+				App/LiveFeedView.swift,
+				App/MockRobotService.swift,
+				App/RobotService.swift,
+				App/RobotStatusMonitor.swift,
+				App/SandBotApp.swift,
+				App/SettingsView.swift,
+				App/StatusPill.swift,
+				App/Stroke.swift,
+				Assets.xcassets,
+				DrawingHistory.swift,
+				Item.swift,
+				RobotStatus.swift,
+				Typography.swift,
+			);
+			target = 3E78A5C02F91B3AD009D2E7D /* SandBotUITests */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
 		3E78A5BA2F91B3AD009D2E7D /* SandBotTests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = SandBotTests;
@@ -43,6 +89,15 @@
 		3E78A5C42F91B3AD009D2E7D /* SandBotUITests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = SandBotUITests;
+			sourceTree = "<group>";
+		};
+		3E78A5E42F91B49D009D2E7D /* SandBot */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				3E78A5E92F91B49D009D2E7D /* Exceptions for "SandBot" folder in "SandBot" target */,
+				3E78A5EA2F91B49D009D2E7D /* Exceptions for "SandBot" folder in "SandBotUITests" target */,
+			);
+			path = SandBot;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -75,7 +130,7 @@
 		3E78A59F2F91B3AC009D2E7D = {
 			isa = PBXGroup;
 			children = (
-				3E78A5AA2F91B3AC009D2E7D /* SandBot */,
+				3E78A5E42F91B49D009D2E7D /* SandBot */,
 				3E78A5BA2F91B3AD009D2E7D /* SandBotTests */,
 				3E78A5C42F91B3AD009D2E7D /* SandBotUITests */,
 				3E78A5A92F91B3AC009D2E7D /* Products */,
@@ -106,9 +161,6 @@
 			buildRules = (
 			);
 			dependencies = (
-			);
-			fileSystemSynchronizedGroups = (
-				3E78A5AA2F91B3AC009D2E7D /* SandBot */,
 			);
 			name = SandBot;
 			packageProductDependencies = (
@@ -155,6 +207,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				3E78A5C42F91B3AD009D2E7D /* SandBotUITests */,
+				3E78A5E42F91B49D009D2E7D /* SandBot */,
 			);
 			name = SandBotUITests;
 			packageProductDependencies = (
