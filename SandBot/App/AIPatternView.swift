@@ -1,3 +1,10 @@
+//
+//  AIPatternView.swift
+//  SandBot
+//
+//  Created by Anderson Colburn on 4/19/26.
+//
+
 import SwiftUI
 
 struct AIPatternView: View {
@@ -29,6 +36,7 @@ struct AIPatternView: View {
                 Text("PRESETS")
                     .font(.sandCaption)
                     .foregroundColor(.sandTextSecondary)
+                    .padding(.horizontal)
 
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
@@ -73,9 +81,8 @@ struct AIPatternView: View {
                         .foregroundColor(.sandTextPrimary)
                         .scrollContentBackground(.hidden)
                         .padding(8)
-                        .frame(minHeight: 70, maxHeight: 70)
+                        .frame(minHeight: 100)
                         .onChange(of: description) {
-                            // If user edits away from a preset, clear the label
                             if !presets.map(\.prompt).contains(description) {
                                 inputLabel = description
                             }

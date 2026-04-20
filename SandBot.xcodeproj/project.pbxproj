@@ -33,10 +33,15 @@
 		3E78A5E92F91B49D009D2E7D /* Exceptions for "SandBot" folder in "SandBot" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				App/AIPatternView.swift,
+				App/ClaudeService.swift,
 				App/Colors.swift,
 				App/ComposeView.swift,
+				App/config.swift,
 				App/ContentView.swift,
 				App/DrawingInstruction.swift,
+				App/HistoryCardView.swift,
+				App/HistoryDetailView.swift,
 				App/HistoryView.swift,
 				App/LiveFeedView.swift,
 				App/MockRobotService.swift,
@@ -45,6 +50,8 @@
 				App/RobotStatusMonitor.swift,
 				App/SandBotApp.swift,
 				App/SandCanvas.swift,
+				App/SendJobManager.swift,
+				App/SendSheet.swift,
 				App/SettingsView.swift,
 				App/StatusPill.swift,
 				App/Stroke.swift,
@@ -61,10 +68,15 @@
 		3E78A5EA2F91B49D009D2E7D /* Exceptions for "SandBot" folder in "SandBotUITests" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				App/AIPatternView.swift,
+				App/ClaudeService.swift,
 				App/Colors.swift,
 				App/ComposeView.swift,
+				App/config.swift,
 				App/ContentView.swift,
 				App/DrawingInstruction.swift,
+				App/HistoryCardView.swift,
+				App/HistoryDetailView.swift,
 				App/HistoryView.swift,
 				App/LiveFeedView.swift,
 				App/MockRobotService.swift,
@@ -73,6 +85,8 @@
 				App/RobotStatusMonitor.swift,
 				App/SandBotApp.swift,
 				App/SandCanvas.swift,
+				App/SendJobManager.swift,
+				App/SendSheet.swift,
 				App/SettingsView.swift,
 				App/StatusPill.swift,
 				App/Stroke.swift,

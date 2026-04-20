@@ -1,3 +1,11 @@
+//
+//  HistoryCardView.swift
+//  SandBot
+//
+//  Created by Anderson Colburn on 4/19/26.
+//
+
+
 import SwiftUI
 
 struct HistoryCardView: View {

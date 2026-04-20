@@ -9,8 +9,7 @@ import SwiftUI
 
 struct TextDrawView: View {
     @Binding var strokes: [Stroke]
-    
-    @State private var inputText: String = ""
+    @Binding var inputText: String
     @State private var selectedFont: String = "Helvetica-Bold"
     
     let availableFonts: [(name: String, displayName: String)] = [
@@ -80,7 +79,9 @@ struct TextDrawView: View {
                 )
             }
         }
-        .padding()
+        .padding(.horizontal)
+        .padding(.top)
+        .padding(.bottom, 8)
     }
     
     private func updateStrokes() {

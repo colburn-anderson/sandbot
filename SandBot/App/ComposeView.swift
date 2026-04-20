@@ -6,11 +6,17 @@
 //
 
 import SwiftUI
+import SwiftData
 
 struct ComposeView: View {
     @EnvironmentObject var statusMonitor: RobotStatusMonitor
+    @Environment(\.modelContext) private var modelContext
+    @StateObject private var sendManager = SendJobManager()
+    
     @State private var strokes: [Stroke] = []
     @State private var selectedTab: ComposeTab = .text
+    @State private var inputText: String = ""
+    @State private var showSendSheet: Bool = false
 
     enum ComposeTab { case text, image, ai }
 
@@ -18,44 +24,45 @@ struct ComposeView: View {
         NavigationStack {
             ZStack {
                 Color.sandBgPrimary.ignoresSafeArea()
-                VStack(spacing: 0) {
+                ScrollView {
+                    VStack(spacing: 0) {
 
-                    // Tab picker
-                    Picker("Mode", selection: $selectedTab) {
-                        Text("Text").tag(ComposeTab.text)
-                        Text("Image").tag(ComposeTab.image)
-                        Text("AI Pattern").tag(ComposeTab.ai)
-                    }
-                    .pickerStyle(.segmented)
-                    .padding()
+                        // Tab picker
+                        Picker("Mode", selection: $selectedTab) {
+                            Text("Text").tag(ComposeTab.text)
+                            Text("Image").tag(ComposeTab.image)
+                            Text("AI Pattern").tag(ComposeTab.ai)
+                        }
+                        .pickerStyle(.segmented)
+                        .padding()
 
-                    // Input area (scrollable)
-                    ScrollView {
+                        // Input area
                         switch selectedTab {
                         case .text:
-                            TextDrawView(strokes: $strokes)
+                            TextDrawView(strokes: $strokes, inputText: $inputText)
                         case .image:
-                            Text("Image — coming soon")
-                                .foregroundColor(.sandTextSecondary)
-                                .padding()
+                            VStack {
+                                Spacer().frame(height: 40)
+                                Text("Image — coming soon")
+                                    .foregroundColor(.sandTextSecondary)
+                                Spacer().frame(height: 40)
+                            }
                         case .ai:
-                            Text("AI Pattern — coming soon")
-                                .foregroundColor(.sandTextSecondary)
-                                .padding()
+                            AIPatternView(strokes: $strokes, inputLabel: $inputText)
                         }
+
+                        // Canvas preview
+                        SandCanvas(strokes: strokes)
+                            .padding(.top, 8)
+
+                        // Send button
+                        PrimaryButton(
+                            title: "Send to Robot",
+                            action: { showSendSheet = true },
+                            isDisabled: strokes.isEmpty || statusMonitor.connectionStatus == .offline
+                        )
+                        .padding()
                     }
-                    .frame(maxHeight: 220)
-
-                    // Canvas preview — outside scroll, full width
-                    SandCanvas(strokes: strokes)
-
-                    // Send button
-                    PrimaryButton(
-                        title: "Send to Robot",
-                        action: { },
-                        isDisabled: strokes.isEmpty || statusMonitor.connectionStatus == .offline
-                    )
-                    .padding()
                 }
             }
             .navigationTitle("SandBot")
@@ -64,6 +71,15 @@ struct ComposeView: View {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     StatusPill(status: statusMonitor.connectionStatus)
                 }
+            }
+            .sheet(isPresented: $showSendSheet) {
+                SendSheet(
+                    strokes: strokes,
+                    label: inputText.isEmpty ? "Drawing" : inputText,
+                    source: selectedTab == .ai ? .aiPattern : .text,
+                    sendManager: sendManager
+                )
+                .onDisappear { sendManager.reset() }
             }
         }
     }

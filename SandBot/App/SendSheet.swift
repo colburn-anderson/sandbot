@@ -1,3 +1,11 @@
+//
+//  SendSheet.swift
+//  SandBot
+//
+//  Created by Anderson Colburn on 4/19/26.
+//
+
+
 import SwiftUI
 import SwiftData
 
@@ -88,7 +96,7 @@ struct SendSheet: View {
         case .sending:    return "Sending..."
         case .queued:     return "Queued on Robot"
         case .success:    return "Drawing Queued!"
-        case .failed(let msg): return "Failed"
+        case .failed: return "Failed"
         }
     }
     
@@ -99,7 +107,7 @@ struct SendSheet: View {
         case .sending:    return "Uploading drawing instructions..."
         case .queued:     return "The robot has your drawing."
         case .success:    return "Check History for updates."
-        case .failed(let msg): return msg
+        case .failed: return "Failed"
         }
     }
     
