@@ -41,12 +41,7 @@ struct ComposeView: View {
                         case .text:
                             TextDrawView(strokes: $strokes, inputText: $inputText)
                         case .image:
-                            VStack {
-                                Spacer().frame(height: 40)
-                                Text("Image — coming soon")
-                                    .foregroundColor(.sandTextSecondary)
-                                Spacer().frame(height: 40)
-                            }
+                            ImageDrawView(strokes: $strokes)
                         case .ai:
                             AIPatternView(strokes: $strokes, inputLabel: $inputText)
                         }
