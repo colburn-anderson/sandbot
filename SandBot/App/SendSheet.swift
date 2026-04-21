@@ -112,13 +112,15 @@ struct SendSheet: View {
     }
     
     private func sendNow() {
+        let commands = strokes.map { ToolCommand.stroke($0) }
         let instruction = DrawingInstruction(
             version: 1,
             source: source,
             label: label,
-            strokes: strokes,
+            commands: commands,
             bounds: DrawingInstruction.DrawingBounds(widthMm: 500, heightMm: 500),
-            speed: .normal
+            speed: .normal,
+            tool: .rounded
         )
         Task {
             await sendManager.send(instruction: instruction, context: modelContext)

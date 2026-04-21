@@ -11,51 +11,51 @@ struct AIPatternView: View {
     @Binding var strokes: [Stroke]
     @Binding var inputLabel: String
 
-    @State private var description: String = ""
+    @State private var customDescription: String = ""
     @State private var isGenerating: Bool = false
     @State private var errorMessage: String? = nil
+    @State private var selectedPattern: String? = nil
+    @State private var density: Double = 0.4
+    @State private var distortion: Double = 0.0
 
-    let presets: [(label: String, prompt: String)] = [
-        ("Spiral Galaxy", "A dense spiral galaxy with multiple arms curving outward from the center, filled with many fine curved lines"),
-        ("Mandala", "A detailed circular mandala with repeating geometric patterns radiating from the center, 8-fold symmetry"),
-        ("Wave Field", "A field of overlapping sine waves at different frequencies and phases, covering the entire surface"),
-        ("Celtic Knot", "An intricate Celtic knot pattern with interwoven continuous lines forming a complex knotwork"),
-        ("Hexagon Grid", "A dense grid of hexagons covering the entire surface, each hexagon outlined precisely"),
-        ("Fibonacci Sunflower", "A sunflower fibonacci spiral pattern with seeds arranged in golden ratio spirals"),
-        ("Lissajous", "A complex lissajous figure with frequency ratio 3:4, drawn as a single continuous looping path"),
-        ("Radial Burst", "Many lines radiating outward from the center at equal angles, with concentric circles crossing them"),
-        ("Maze", "A dense rectangular maze filling the entire surface with many corridors and dead ends"),
-        ("Rose Curve", "A mathematical rose curve with 8 petals, drawn with fine detail and multiple overlapping passes"),
-    ]
+    private let generator = PatternGenerator.shared
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 20) {
 
-            // Preset chips
-            VStack(alignment: .leading, spacing: 8) {
-                Text("PRESETS")
+            // Pattern presets
+            VStack(alignment: .leading, spacing: 10) {
+                Text("PATTERNS")
                     .font(.sandCaption)
                     .foregroundColor(.sandTextSecondary)
                     .padding(.horizontal)
 
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(presets, id: \.label) { preset in
+                    HStack(spacing: 10) {
+                        ForEach(generator.allPatterns, id: \.label) { pattern in
                             Button(action: {
-                                description = preset.prompt
-                                inputLabel = preset.label
+                                selectedPattern = pattern.label
+                                customDescription = ""
+                                errorMessage = nil
+                                inputLabel = pattern.label
+                                regenerate(pattern: pattern)
                             }) {
-                                Text(preset.label)
-                                    .font(.sandCaption)
-                                    .foregroundColor(description == preset.prompt ? Color.sandBgPrimary : Color.sandTextPrimary)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 8)
-                                    .background(description == preset.prompt ? Color.sandGold : Color.sandSurface)
-                                    .overlay(
-                                        Capsule()
-                                            .stroke(description == preset.prompt ? Color.sandGold : Color.sandBorder, lineWidth: 1)
-                                    )
-                                    .clipShape(Capsule())
+                                VStack(spacing: 4) {
+                                    Text(pattern.label)
+                                        .font(.sandBody)
+                                        .foregroundColor(selectedPattern == pattern.label ? Color.sandBgPrimary : Color.sandTextPrimary)
+                                    Text(pattern.description)
+                                        .font(.sandCaption)
+                                        .foregroundColor(selectedPattern == pattern.label ? Color.sandBgPrimary.opacity(0.7) : Color.sandTextSecondary)
+                                }
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 10)
+                                .background(selectedPattern == pattern.label ? Color.sandGold : Color.sandSurface)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(selectedPattern == pattern.label ? Color.sandGold : Color.sandBorder, lineWidth: 1)
+                                )
+                                .cornerRadius(8)
                             }
                         }
                     }
@@ -63,76 +63,130 @@ struct AIPatternView: View {
                 }
             }
 
-            // Custom description
+            // Sliders — only show when a math pattern is selected
+            if selectedPattern != nil {
+                VStack(spacing: 14) {
+                    SliderRow(
+                        label: "DENSITY",
+                        value: $density,
+                        leftLabel: "Sparse",
+                        rightLabel: "Dense",
+                        range: 0.0...0.9
+                    )
+                    SliderRow(
+                        label: "DISTORTION",
+                        value: $distortion,
+                        leftLabel: "Pure",
+                        rightLabel: "Organic"
+                    )
+                }
+                .padding(.horizontal)
+                .onChange(of: density) { regenerateSelected() }
+                .onChange(of: distortion) { regenerateSelected() }
+            }
+
+            // Divider
+            HStack {
+                Rectangle().fill(Color.sandBorder).frame(height: 1)
+                Text("OR").font(.sandCaption).foregroundColor(.sandTextSecondary).padding(.horizontal, 8)
+                Rectangle().fill(Color.sandBorder).frame(height: 1)
+            }
+            .padding(.horizontal)
+
+            // Custom AI
             VStack(alignment: .leading, spacing: 8) {
-                Text("DESCRIPTION")
+                Text("CUSTOM (AI)")
                     .font(.sandCaption)
                     .foregroundColor(.sandTextSecondary)
 
                 ZStack(alignment: .topLeading) {
-                    if description.isEmpty {
-                        Text("Describe a pattern...")
+                    if customDescription.isEmpty {
+                        Text("Describe something unique...")
                             .font(.sandBody)
                             .foregroundColor(.sandTextSecondary)
                             .padding(12)
                     }
-                    TextEditor(text: $description)
+                    TextEditor(text: $customDescription)
                         .font(.sandBody)
                         .foregroundColor(.sandTextPrimary)
                         .scrollContentBackground(.hidden)
                         .padding(8)
-                        .frame(minHeight: 100)
-                        .onChange(of: description) {
-                            if !presets.map(\.prompt).contains(description) {
-                                inputLabel = description
+                        .frame(minHeight: 80)
+                        .onChange(of: customDescription) {
+                            if !customDescription.isEmpty {
+                                selectedPattern = nil
+                                inputLabel = customDescription
                             }
                         }
                 }
                 .background(Color.sandSurface)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.sandBorder, lineWidth: 1)
-                )
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.sandBorder, lineWidth: 1))
                 .cornerRadius(8)
             }
             .padding(.horizontal)
 
-            // Error
             if let error = errorMessage {
-                Text(error)
-                    .font(.sandCaption)
-                    .foregroundColor(.sandError)
-                    .padding(.horizontal)
+                Text(error).font(.sandCaption).foregroundColor(.sandError).padding(.horizontal)
             }
 
-            // Generate button
-            PrimaryButton(
-                title: isGenerating ? "Generating..." : "Generate Pattern",
-                action: generatePattern,
-                isDisabled: description.trimmingCharacters(in: .whitespaces).isEmpty || isGenerating
-            )
-            .padding(.horizontal)
+            if !customDescription.trimmingCharacters(in: .whitespaces).isEmpty {
+                PrimaryButton(
+                    title: isGenerating ? "Generating..." : "Generate with AI",
+                    action: generateWithClaude,
+                    isDisabled: isGenerating
+                )
+                .padding(.horizontal)
+            }
         }
         .padding(.vertical)
     }
 
-    private func generatePattern() {
+    private func regenerate(pattern: PatternGenerator.Pattern) {
+        strokes = pattern.generate(density, distortion)
+    }
+
+    private func regenerateSelected() {
+        guard let label = selectedPattern,
+              let pattern = generator.allPatterns.first(where: { $0.label == label }) else { return }
+        strokes = pattern.generate(density, distortion)
+    }
+
+    private func generateWithClaude() {
         errorMessage = nil
         isGenerating = true
         strokes = []
-
         Task {
             do {
-                let result = try await ClaudeService.shared.generatePattern(description: description)
-                await MainActor.run {
-                    strokes = result
-                    isGenerating = false
-                }
+                let result = try await ClaudeService.shared.generatePattern(description: customDescription)
+                await MainActor.run { strokes = result; isGenerating = false }
             } catch {
-                await MainActor.run {
-                    errorMessage = error.localizedDescription
-                    isGenerating = false
-                }
+                await MainActor.run { errorMessage = error.localizedDescription; isGenerating = false }
+            }
+        }
+    }
+}
+
+struct SliderRow: View {
+    let label: String
+    @Binding var value: Double
+    let leftLabel: String
+    let rightLabel: String
+    var range: ClosedRange<Double> = 0...1
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(label)
+                .font(.sandCaption)
+                .foregroundColor(.sandTextSecondary)
+            HStack(spacing: 10) {
+                Text(leftLabel)
+                    .font(.sandCaption)
+                    .foregroundColor(.sandTextSecondary)
+                Slider(value: $value, in: range)
+                    .tint(Color.sandGold)
+                Text(rightLabel)
+                    .font(.sandCaption)
+                    .foregroundColor(.sandTextSecondary)
             }
         }
     }
