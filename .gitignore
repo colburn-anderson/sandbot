@@ -5,3 +5,5 @@ SandBot/Config.swift
 *.jpeg
 *.cer
 *.mobileprovision
+SandBot/App/Config.swift
+SandBot/App/config.swift
