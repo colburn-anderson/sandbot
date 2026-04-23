@@ -1,1 +1,7 @@
 Sandbot/Config.swift
+SandBot/Config.swift
+*.png
+*.jpg
+*.jpeg
+*.cer
+*.mobileprovision
