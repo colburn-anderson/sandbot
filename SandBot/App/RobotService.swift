@@ -7,7 +7,7 @@
 
 import Foundation
 
-let USE_MOCK_ROBOT = true
+let USE_MOCK_ROBOT = false
 
 protocol RobotServiceProtocol {
     func fetchStatus() async throws -> RobotStatusResponse
@@ -26,7 +26,7 @@ final class RobotService {
 final class LiveRobotService: RobotServiceProtocol {
     private var baseURL: String {
         let host = UserDefaults.standard.string(forKey: "robotHost") ?? "sandbot.local"
-        return "https://\(host)"
+        return "http://\(host)"
     }
 
     func fetchStatus() async throws -> RobotStatusResponse {
