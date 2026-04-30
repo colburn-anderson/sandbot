@@ -31,7 +31,7 @@ struct ComposeView: View {
                         Picker("Mode", selection: $selectedTab) {
                             Text("Text").tag(ComposeTab.text)
                             Text("Image").tag(ComposeTab.image)
-                            Text("AI Pattern").tag(ComposeTab.ai)
+                            Text("Pattern").tag(ComposeTab.ai)
                         }
                         .pickerStyle(.segmented)
                         .padding()
