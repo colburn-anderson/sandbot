@@ -9,10 +9,7 @@
 	</dict>
 	<key>UIAppFonts</key>
 	<array>
-		<string>DancingScript-Regular.ttf</string>
 		<string>DancingScript-Bold.ttf</string>
-		<string>DancingScript-Medium.ttf</string>
-		<string>DancingScript-SemiBold.ttf</string>
 		<string>Parisienne-Regular.ttf</string>
 		<string>Rochester-Regular.ttf</string>
 		<string>Sacramento-Regular.ttf</string>
