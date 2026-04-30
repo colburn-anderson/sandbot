@@ -7,7 +7,7 @@
 
 import Foundation
 
-let USE_MOCK_ROBOT = false
+let USE_MOCK_ROBOT = true
 
 protocol RobotServiceProtocol {
     func fetchStatus() async throws -> RobotStatusResponse

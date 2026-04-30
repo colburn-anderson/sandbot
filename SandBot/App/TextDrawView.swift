@@ -21,6 +21,11 @@ struct TextDrawView: View {
         ("AmericanTypewriter-Bold", "Typewriter"),
         ("Baskerville-Bold", "Baskerville"),
         ("GillSans-Bold", "Gill Sans"),
+        ("DancingScript-Bold", "Dancing"),
+        ("Parisienne-Regular", "Parisienne"),
+        ("Rochester-Regular", "Rochester"),
+        ("Sacramento-Regular", "Sacramento"),
+        ("PetitFormalScript-Regular", "Petit Formal"),
     ]
     
     var body: some View {

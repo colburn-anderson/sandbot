@@ -10,6 +10,7 @@ import Combine
 
 @MainActor
 final class RobotStatusMonitor: ObservableObject {
+    static var shared: RobotStatusMonitor = RobotStatusMonitor()
     @Published var connectionStatus: RobotConnectionStatus = .connecting
     @Published var robotState: RobotState = .idle
 
