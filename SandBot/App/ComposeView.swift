@@ -2,7 +2,7 @@
 //  ComposeView.swift
 //  SandBot
 //
-//  Created by Anderson Colburn on 4/16/26.
+//  Rewritten for Freenove bridge integration.
 //
 
 import SwiftUI
@@ -12,13 +12,44 @@ struct ComposeView: View {
     @EnvironmentObject var statusMonitor: RobotStatusMonitor
     @Environment(\.modelContext) private var modelContext
     @StateObject private var sendManager = SendJobManager()
-    
-    @State private var strokes: [Stroke] = []
+
     @State private var selectedTab: ComposeTab = .text
-    @State private var inputText: String = ""
     @State private var showSendSheet: Bool = false
 
+    // Text state
+    @State private var inputText: String = ""
+    @State private var fontSize: Double = 80
+    @State private var selectedFont: String = "Helvetica-Bold"
+
+    // Image state
+    @State private var selectedImage: UIImage? = nil
+    @State private var previewImage: UIImage? = nil
+
+    // Shared processing params (matching Freenove GUI defaults)
+    @State private var threshold: Double = 151
+    @State private var gauss: Double = 3
+    @State private var sharpen: Double = 7
+
     enum ComposeTab { case text, image, ai }
+
+    var canSend: Bool {
+        switch selectedTab {
+        case .text:
+            return !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .image:
+            return selectedImage != nil
+        case .ai:
+            return !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
+    var sendLabel: String {
+        switch selectedTab {
+        case .text: return inputText.isEmpty ? "Drawing" : inputText
+        case .image: return "Image Drawing"
+        case .ai: return inputText.isEmpty ? "AI Pattern" : inputText
+        }
+    }
 
     var body: some View {
         NavigationStack {
@@ -39,22 +70,24 @@ struct ComposeView: View {
                         // Input area
                         switch selectedTab {
                         case .text:
-                            TextDrawView(strokes: $strokes, inputText: $inputText)
+                            TextDrawView(inputText: $inputText, fontSize: $fontSize, selectedFont: $selectedFont)
                         case .image:
-                            ImageDrawView(strokes: $strokes)
+                            ImageDrawView(
+                                previewImage: $previewImage,
+                                selectedImage: $selectedImage,
+                                threshold: $threshold,
+                                gauss: $gauss,
+                                sharpen: $sharpen
+                            )
                         case .ai:
-                            AIPatternView(strokes: $strokes, inputLabel: $inputText)
+                            AIPatternView(strokes: .constant([]), inputLabel: $inputText)
                         }
-
-                        // Canvas preview
-                        SandCanvas(strokes: strokes)
-                            .padding(.top, 8)
 
                         // Send button
                         PrimaryButton(
                             title: "Send to Robot",
                             action: { showSendSheet = true },
-                            isDisabled: strokes.isEmpty || statusMonitor.connectionStatus == .offline
+                            isDisabled: !canSend || statusMonitor.connectionStatus == .offline
                         )
                         .padding()
                     }
@@ -69,9 +102,15 @@ struct ComposeView: View {
             }
             .sheet(isPresented: $showSendSheet) {
                 SendSheet(
-                    strokes: strokes,
-                    label: inputText.isEmpty ? "Drawing" : inputText,
-                    source: selectedTab == .ai ? .aiPattern : .text,
+                    selectedTab: selectedTab,
+                    inputText: sendLabel,
+                    fontSize: Int(fontSize),
+                    selectedFont: selectedFont,
+                    selectedImage: selectedImage,
+                    threshold: Int(threshold),
+                    gauss: Int(gauss),
+                    sharpen: Int(sharpen),
+                    penUpHeight: 30,
                     sendManager: sendManager
                 )
                 .onDisappear { sendManager.reset() }

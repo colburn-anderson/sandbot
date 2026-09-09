@@ -2,16 +2,18 @@
 //  TextDrawView.swift
 //  SandBot
 //
-//  Created by Anderson Colburn on 4/19/26.
+//  Restored font picker with all original custom fonts.
+//  Text is sent to the bridge for drawing, but the font preview
+//  still renders on-device for instant visual feedback.
 //
 
 import SwiftUI
 
 struct TextDrawView: View {
-    @Binding var strokes: [Stroke]
     @Binding var inputText: String
-    @State private var selectedFont: String = "Helvetica-Bold"
-    
+    @Binding var fontSize: Double
+    @Binding var selectedFont: String
+
     let availableFonts: [(name: String, displayName: String)] = [
         ("Helvetica-Bold", "Helvetica"),
         ("Georgia-Bold", "Georgia"),
@@ -27,13 +29,13 @@ struct TextDrawView: View {
         ("Sacramento-Regular", "Sacramento"),
         ("PetitFormalScript-Regular", "Petit Formal"),
     ]
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            
+
             // Text input
             VStack(alignment: .leading, spacing: 8) {
-                Text("TEXT")
+                Text("MESSAGE")
                     .font(.sandCaption)
                     .foregroundColor(.sandTextSecondary)
                 TextField("Type something...", text: $inputText)
@@ -46,9 +48,8 @@ struct TextDrawView: View {
                             .stroke(Color.sandBorder, lineWidth: 1)
                     )
                     .cornerRadius(8)
-                    .onChange(of: inputText) { updateStrokes() }
             }
-            
+
             // Font picker
             VStack(alignment: .leading, spacing: 8) {
                 Text("FONT")
@@ -65,7 +66,6 @@ struct TextDrawView: View {
                             )
                             .onTapGesture {
                                 selectedFont = font.name
-                                updateStrokes()
                             }
                         }
                     }
@@ -83,18 +83,41 @@ struct TextDrawView: View {
                     }
                 )
             }
+
+            // Font size slider
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("SIZE")
+                        .font(.sandCaption)
+                        .foregroundColor(.sandTextSecondary)
+                    Spacer()
+                    Text("\(Int(fontSize))pt")
+                        .font(.sandCaption)
+                        .foregroundColor(.sandGold)
+                }
+                Slider(value: $fontSize, in: 30...150, step: 5)
+                    .tint(Color.sandGold)
+            }
+
+            // Live preview
+            if !inputText.isEmpty {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.sandSurface)
+                        .frame(height: 120)
+
+                    Text(inputText)
+                        .font(.custom(selectedFont, size: fontSize * 0.35))
+                        .foregroundColor(.sandTextPrimary)
+                        .lineLimit(3)
+                        .multilineTextAlignment(.center)
+                        .padding()
+                }
+            }
         }
         .padding(.horizontal)
         .padding(.top)
         .padding(.bottom, 8)
-    }
-    
-    private func updateStrokes() {
-        guard !inputText.trimmingCharacters(in: .whitespaces).isEmpty else {
-            strokes = []
-            return
-        }
-        strokes = TextPathService.shared.strokes(from: inputText, fontName: selectedFont)
     }
 }
 
@@ -103,7 +126,7 @@ struct FontChip: View {
     let displayName: String
     let previewText: String
     let isSelected: Bool
-    
+
     var body: some View {
         VStack(spacing: 6) {
             Text(previewText.prefix(8).description)
