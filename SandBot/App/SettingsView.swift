@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct SettingsView: View {
-    @AppStorage("robotHost") private var robotHost: String = "sandbot.local"
+    @AppStorage("robotHost") private var robotHost: String = "100.95.15.84:8080";
     @AppStorage("surfaceWidthMm") private var surfaceWidth: Double = 500
     @AppStorage("surfaceHeightMm") private var surfaceHeight: Double = 500
     @AppStorage("defaultSpeed") private var defaultSpeed: String = "normal"
