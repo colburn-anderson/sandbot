@@ -2,7 +2,7 @@
 //  SendJobManager.swift
 //  SandBot
 //
-//  Rewritten for Freenove bridge integration.
+//  Fixed: properly waits for actual completion before showing success.
 //
 
 import Foundation
@@ -10,11 +10,12 @@ import Combine
 import SwiftData
 import UIKit
 
-enum SendState {
+enum SendState: Equatable {
     case idle
     case connecting
     case sending
     case queued
+    case drawing
     case success(jobId: String)
     case failed(String)
 }
@@ -41,14 +42,9 @@ final class SendJobManager: ObservableObject {
             )
 
             sendState = .queued
-            try? await Task.sleep(nanoseconds: 500_000_000)
-            sendState = .success(jobId: jobId)
-
-            // Save to history
             saveHistory(label: label, source: "image", jobId: jobId, context: context)
 
-            // Poll for completion
-            Task { await pollForCompletion(jobId: jobId, context: context) }
+            await pollUntilDone(jobId: jobId)
 
         } catch {
             sendState = .failed(error.localizedDescription)
@@ -74,14 +70,9 @@ final class SendJobManager: ObservableObject {
             )
 
             sendState = .queued
-            try? await Task.sleep(nanoseconds: 500_000_000)
-            sendState = .success(jobId: jobId)
-
-            // Save to history
             saveHistory(label: text, source: "text", jobId: jobId, context: context)
 
-            // Poll for completion
-            Task { await pollForCompletion(jobId: jobId, context: context) }
+            await pollUntilDone(jobId: jobId)
 
         } catch {
             sendState = .failed(error.localizedDescription)
@@ -107,21 +98,38 @@ final class SendJobManager: ObservableObject {
         try? context.save()
     }
 
-    // MARK: - Polling
+    // MARK: - Polling (this is what actually drives the UI state now)
 
-    private func pollForCompletion(jobId: String, context: ModelContext) async {
+    private func pollUntilDone(jobId: String) async {
+        // Give the bridge a moment to transition the job to "drawing"
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        sendState = .drawing
+
         var attempts = 0
-        while attempts < 60 {  // up to 5 minutes
+        let maxAttempts = 120  // up to 10 minutes at 5s intervals
+
+        while attempts < maxAttempts {
             try? await Task.sleep(nanoseconds: 5_000_000_000)
             do {
                 let status = try await RobotService.shared.fetchJobStatus(jobId: jobId)
-                if status == .completed || status == .failed {
+                switch status {
+                case .completed:
+                    sendState = .success(jobId: jobId)
                     return
+                case .failed:
+                    sendState = .failed("The drawing failed partway through.")
+                    return
+                case .drawing, .sent:
+                    // Still going — keep the in-progress screen up
+                    sendState = .drawing
                 }
             } catch {
-                break
+                // Network hiccup — don't fail immediately, just keep trying
             }
             attempts += 1
         }
+
+        // Timed out waiting — let the user know rather than hanging forever
+        sendState = .failed("Taking longer than expected. Check History for status.")
     }
 }

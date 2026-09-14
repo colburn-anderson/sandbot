@@ -63,7 +63,7 @@ struct SendSheet: View {
                     PrimaryButton(title: "Confirm Send", action: sendNow)
                     PrimaryButton(title: "Cancel", action: { dismiss() }, style: .secondary)
 
-                case .connecting, .sending, .queued:
+                case .connecting, .sending, .queued, .drawing:
                     ProgressView()
                         .tint(Color.sandGold)
 
@@ -88,12 +88,13 @@ struct SendSheet: View {
         case .queued:      return "clock"
         case .success:     return "checkmark.circle.fill"
         case .failed:      return "xmark.circle.fill"
+        case .drawing:     return "pencil.and.outline"
         }
     }
 
     private var iconColor: Color {
         switch sendManager.sendState {
-        case .idle, .connecting, .sending, .queued: return Color.sandGold
+        case .idle, .connecting, .sending, .queued, .drawing: return Color.sandGold
         case .success:  return Color.sandSuccess
         case .failed:   return Color.sandError
         }
@@ -107,6 +108,7 @@ struct SendSheet: View {
         case .queued:     return "Drawing Started!"
         case .success:    return "Drawing Complete!"
         case .failed:     return "Failed"
+        case .drawing:    return "Drawing..."
         }
     }
 
@@ -117,6 +119,7 @@ struct SendSheet: View {
         case .sending:    return "Uploading and processing..."
         case .queued:     return "The robot is drawing now."
         case .success:    return "Check History for updates."
+        case .drawing:    return "The robot is drawing your \(label.isEmpty ? "creation" : "design") right now."
         case .failed(let msg): return msg
         }
     }
@@ -158,6 +161,7 @@ struct SendSheet: View {
                     penUpHeight: penUpHeight,
                     context: modelContext
                 )
+                
             }
         }
     }
