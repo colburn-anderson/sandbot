@@ -99,20 +99,9 @@ struct TextDrawView: View {
                     .tint(Color.sandGold)
             }
 
-            // Live preview
+            // Live preview — shaped like the real sand pit
             if !inputText.isEmpty {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color.sandSurface)
-                        .frame(height: 120)
-
-                    Text(inputText)
-                        .font(.custom(selectedFont, size: fontSize * 0.35))
-                        .foregroundColor(.sandTextPrimary)
-                        .lineLimit(3)
-                        .multilineTextAlignment(.center)
-                        .padding()
-                }
+                PitTextPreview(text: inputText, fontSize: fontSize, fontName: selectedFont)
             }
         }
         .padding(.horizontal)
@@ -145,5 +134,53 @@ struct FontChip: View {
                 .stroke(isSelected ? Color.sandGold : Color.sandBorder, lineWidth: 1)
         )
         .cornerRadius(8)
+    }
+}
+
+/// What the robot will actually draw: the bridge renders the text inside the
+/// pit outline (clipped at the rim). Falls back to an on-device mockup offline.
+struct PitTextPreview: View {
+    let text: String
+    let fontSize: Double
+    let fontName: String
+
+    @ObservedObject private var store = PitBoundaryStore.shared
+    @State private var serverPreview: UIImage? = nil
+    @State private var isLoading = false
+
+    private var requestKey: String { "\(text)|\(Int(fontSize))|\(fontName)" }
+
+    var body: some View {
+        ZStack {
+            if let image = serverPreview {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+            } else {
+                PitBackdrop(boundary: store.boundary)
+                    .overlay(
+                        Text(text)
+                            .font(.custom(fontName, size: fontSize * 0.35))
+                            .foregroundColor(.sandTextPrimary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.3)
+                            .padding(.horizontal, 24)
+                    )
+            }
+            if isLoading {
+                ProgressView().tint(Color.sandGold)
+            }
+        }
+        .cornerRadius(8)
+        .task(id: requestKey) {
+            try? await Task.sleep(nanoseconds: 400_000_000)  // debounce typing
+            guard !Task.isCancelled else { return }
+            isLoading = true
+            let image = try? await RobotService.shared.fetchTextPreview(text, fontSize: Int(fontSize), fontName: fontName)
+            if !Task.isCancelled {
+                serverPreview = image
+                isLoading = false
+            }
+        }
     }
 }

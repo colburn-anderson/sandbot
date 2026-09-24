@@ -61,4 +61,16 @@ final class MockRobotService: RobotServiceProtocol {
     func sendMoveCommand(position: String) async throws {
         try await Task.sleep(nanoseconds: 500_000_000)
     }
+
+    func fetchBoundary() async throws -> PitBoundary {
+        .default
+    }
+
+    func fetchJobPhoto(jobId: String) async throws -> Data? {
+        nil
+    }
+
+    func fetchTextPreview(_ text: String, fontSize: Int, fontName: String) async throws -> UIImage {
+        throw RobotError.invalidResponse  // falls back to the on-device preview
+    }
 }

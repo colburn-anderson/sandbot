@@ -9,8 +9,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @AppStorage("robotHost") private var robotHost: String = "100.95.15.84:8080"
-    @AppStorage("surfaceWidthMm") private var surfaceWidth: Double = 500
-    @AppStorage("surfaceHeightMm") private var surfaceHeight: Double = 500
+    @ObservedObject private var pitStore = PitBoundaryStore.shared
     @AppStorage("defaultSpeed") private var defaultSpeed: String = "normal"
     @AppStorage("drawingZHeight") private var drawingZHeight: Double = 40.0
 
@@ -138,32 +137,22 @@ struct SettingsView: View {
                         }
                     }
 
-                    Section("Drawing Surface") {
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Text("Width")
-                                    .font(.sandBody)
-                                    .foregroundColor(.sandTextSecondary)
-                                Spacer()
-                                Text("\(Int(surfaceWidth)) mm")
-                                    .font(.sandBody)
-                                    .foregroundColor(.sandTextPrimary)
+                    Section("Sand Pit") {
+                        NavigationLink {
+                            PitCalibrationView()
+                        } label: {
+                            HStack(spacing: 14) {
+                                PitBackdrop(boundary: pitStore.boundary)
+                                    .frame(width: 64)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Boundary")
+                                        .font(.sandBody)
+                                        .foregroundColor(.sandTextPrimary)
+                                    Text(pitStore.boundary.calibrated ? "Calibrated · safe Z \(Int(pitStore.boundary.safeZ))" : "Estimated — tap to calibrate")
+                                        .font(.sandCaption)
+                                        .foregroundColor(pitStore.boundary.calibrated ? .sandTextSecondary : .sandOrange)
+                                }
                             }
-                            Slider(value: $surfaceWidth, in: 100...1000, step: 50)
-                                .tint(Color.sandGold)
-                        }
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Text("Height")
-                                    .font(.sandBody)
-                                    .foregroundColor(.sandTextSecondary)
-                                Spacer()
-                                Text("\(Int(surfaceHeight)) mm")
-                                    .font(.sandBody)
-                                    .foregroundColor(.sandTextPrimary)
-                            }
-                            Slider(value: $surfaceHeight, in: 100...1000, step: 50)
-                                .tint(Color.sandGold)
                         }
                     }
 

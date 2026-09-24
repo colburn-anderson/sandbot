@@ -9,7 +9,8 @@ import SwiftUI
 
 struct SandCanvas: View {
     let strokes: [Stroke]
-    
+    @ObservedObject private var pitStore = PitBoundaryStore.shared
+
     @State private var flatPoints: [(StrokePoint, CGFloat)] = []
     @State private var totalLength: CGFloat = 0
 
@@ -21,13 +22,9 @@ struct SandCanvas: View {
             drawStrokes(context: context, size: size, progress: progress)
         }
         .frame(maxWidth: .infinity)
-        .aspectRatio(16/9, contentMode: .fit)
-        .background(Color.sandBgSecondary)
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.sandGold.opacity(0.25), lineWidth: 1)
-        )
-        .cornerRadius(12)
+        .aspectRatio(pitStore.boundary.aspectRatio, contentMode: .fit)
+        .clipShape(PitShape(boundary: pitStore.boundary))
+        .background(PitBackdrop(boundary: pitStore.boundary))
         .padding(.horizontal, 8)
         .onChange(of: strokes) {
             debounceTask?.cancel()

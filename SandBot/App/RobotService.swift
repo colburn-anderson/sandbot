@@ -24,6 +24,9 @@ protocol RobotServiceProtocol {
     func relaxMotors() async throws
     func stopArm() async throws
     func sendMoveCommand(position: String) async throws
+    func fetchBoundary() async throws -> PitBoundary
+    func fetchTextPreview(_ text: String, fontSize: Int, fontName: String) async throws -> UIImage
+    func fetchJobPhoto(jobId: String) async throws -> Data?
 }
 
 // MARK: - Shared instance
@@ -37,7 +40,7 @@ final class RobotService {
 // MARK: - Live implementation
 
 final class LiveRobotService: RobotServiceProtocol {
-    private var baseURL: String {
+    fileprivate var baseURL: String {
         let host = UserDefaults.standard.string(forKey: "robotHost") ?? "100.95.15.84:8080"
         return "http://\(host)"
     }
@@ -198,6 +201,40 @@ final class LiveRobotService: RobotServiceProtocol {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(["position": position])
         _ = try await URLSession.shared.data(for: request)
+    }
+}
+
+// MARK: - Sand pit boundary
+
+extension LiveRobotService {
+    func fetchBoundary() async throws -> PitBoundary {
+        var request = URLRequest(url: URL(string: "\(baseURL)/boundary")!)
+        request.timeoutInterval = 5
+        let (data, _) = try await URLSession.shared.data(for: request)
+        return try JSONDecoder().decode(PitBoundary.self, from: data)
+    }
+
+    /// Server-rendered preview of text inside the pit — exactly what will be drawn.
+    func fetchTextPreview(_ text: String, fontSize: Int, fontName: String) async throws -> UIImage {
+        var request = URLRequest(url: URL(string: "\(baseURL)/preview-text")!)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 15
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "text": text, "font_name": fontName, "font_size": fontSize,
+        ])
+        let (data, _) = try await URLSession.shared.data(for: request)
+        guard let image = UIImage(data: data) else { throw RobotError.invalidResponse }
+        return image
+    }
+}
+
+extension LiveRobotService {
+    /// Photo the Pi took from the camera view position after the drawing finished.
+    func fetchJobPhoto(jobId: String) async throws -> Data? {
+        let (data, response) = try await URLSession.shared.data(from: URL(string: "\(baseURL)/job/\(jobId)/photo")!)
+        guard (response as? HTTPURLResponse)?.statusCode == 200, UIImage(data: data) != nil else { return nil }
+        return data
     }
 }
 

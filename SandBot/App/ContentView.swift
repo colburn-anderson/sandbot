@@ -32,5 +32,6 @@ struct ContentView: View {
         .tint(Color.sandGold)
         .preferredColorScheme(.dark)
         .environmentObject(statusMonitor)
+        .task { await PitBoundaryStore.shared.refresh() }
     }
 }
