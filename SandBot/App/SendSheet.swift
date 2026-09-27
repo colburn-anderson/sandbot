@@ -66,6 +66,8 @@ struct SendSheet: View {
                 case .connecting, .sending, .queued, .drawing:
                     ProgressView()
                         .tint(Color.sandGold)
+                    // Closing is safe: the robot finishes and History catches up later.
+                    PrimaryButton(title: "Close", action: { dismiss() }, style: .secondary)
 
                 case .success:
                     PrimaryButton(title: "Done", action: { dismiss() })
@@ -119,7 +121,11 @@ struct SendSheet: View {
         case .sending:    return "Uploading and processing..."
         case .queued:     return "The robot is drawing now."
         case .success:    return "Check History for updates."
-        case .drawing:    return "The robot is drawing your \(label.isEmpty ? "creation" : "design") right now."
+        case .drawing:
+            if sendManager.isReconnecting {
+                return "Lost connection to the robot — it keeps drawing on its own. Reconnecting…"
+            }
+            return "The robot is drawing your \(label.isEmpty ? "creation" : "design") right now."
         case .failed(let msg): return msg
         }
     }

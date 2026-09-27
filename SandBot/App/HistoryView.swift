@@ -11,6 +11,7 @@ import SwiftData
 
 struct HistoryView: View {
     @Query(sort: \DrawingHistoryEntry.timestamp, order: .reverse) var entries: [DrawingHistoryEntry]
+    @Environment(\.modelContext) private var modelContext
 
     var body: some View {
         NavigationStack {
@@ -45,6 +46,8 @@ struct HistoryView: View {
             }
             .navigationTitle("History")
             .navigationBarTitleDisplayMode(.inline)
+            .task { await SendJobManager.refreshUnfinished(entries, context: modelContext) }
+            .refreshable { await SendJobManager.refreshUnfinished(entries, context: modelContext) }
         }
     }
 }

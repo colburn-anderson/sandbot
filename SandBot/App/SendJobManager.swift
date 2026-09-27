@@ -23,6 +23,9 @@ enum SendState: Equatable {
 @MainActor
 final class SendJobManager: ObservableObject {
     @Published var sendState: SendState = .idle
+    /// True while the robot can't be reached mid-job. The Pi keeps drawing on
+    /// its own; we keep polling and pick the job back up when it reappears.
+    @Published var isReconnecting = false
 
     // MARK: - Send Image
 
@@ -83,6 +86,41 @@ final class SendJobManager: ObservableObject {
 
     func reset() {
         sendState = .idle
+        isReconnecting = false
+    }
+
+    // MARK: - Catch up on jobs that finished while the app wasn't watching
+
+    /// Re-check History entries still marked sent/drawing (app closed, lost
+    /// connection, timed out) and pull in their status and photo.
+    static func refreshUnfinished(_ entries: [DrawingHistoryEntry], context: ModelContext) async {
+        for entry in entries where entry.status == .sent || entry.status == .drawing {
+            guard let jobId = entry.jobId, !jobId.isEmpty else { continue }
+            do {
+                switch try await RobotService.shared.fetchJobStatus(jobId: jobId) {
+                case .completed:
+                    entry.status = .completed
+                    if entry.completionPhotoData == nil {
+                        entry.completionPhotoData = try? await RobotService.shared.fetchJobPhoto(jobId: jobId)
+                    }
+                case .failed:
+                    entry.status = .failed
+                case .drawing, .sent:
+                    entry.status = .drawing
+                }
+            } catch RobotError.jobNotFound {
+                // Robot restarted since; the photo may still be on disk.
+                if let photo = try? await RobotService.shared.fetchJobPhoto(jobId: jobId) {
+                    entry.completionPhotoData = photo
+                    entry.status = .completed
+                } else {
+                    entry.status = .failed
+                }
+            } catch {
+                return  // robot unreachable — try again next time
+            }
+        }
+        try? context.save()
     }
 
     // MARK: - History
@@ -107,13 +145,18 @@ final class SendJobManager: ObservableObject {
         try? await Task.sleep(nanoseconds: 1_000_000_000)
         sendState = .drawing
 
-        var attempts = 0
-        let maxAttempts = 120  // up to 10 minutes at 5s intervals
+        let started = Date()
+        var lastContact = Date()
+        let maxSilence: TimeInterval = 20 * 60   // unreachable this long → give up
+        let maxTotal: TimeInterval = 90 * 60     // big drawings can take a while
 
-        while attempts < maxAttempts {
+        while Date().timeIntervalSince(started) < maxTotal,
+              Date().timeIntervalSince(lastContact) < maxSilence {
             try? await Task.sleep(nanoseconds: 5_000_000_000)
             do {
                 let status = try await RobotService.shared.fetchJobStatus(jobId: jobId)
+                lastContact = Date()
+                isReconnecting = false
                 switch status {
                 case .completed:
                     entry.status = .completed
@@ -131,13 +174,18 @@ final class SendJobManager: ObservableObject {
                     // Still going — keep the in-progress screen up
                     sendState = .drawing
                 }
+            } catch RobotError.jobNotFound {
+                isReconnecting = false
+                sendState = .failed("The robot restarted and lost track of this drawing. Check the pit.")
+                return
             } catch {
-                // Network hiccup — don't fail immediately, just keep trying
+                // Network hiccup — the Pi keeps drawing; keep trying.
+                isReconnecting = true
             }
-            attempts += 1
         }
 
-        // Timed out waiting — let the user know rather than hanging forever
-        sendState = .failed("Taking longer than expected. Check History for status.")
+        isReconnecting = false
+        // History re-checks unfinished jobs later, so nothing is lost.
+        sendState = .failed("Couldn't reach the robot for a while. History will update when it's back.")
     }
 }

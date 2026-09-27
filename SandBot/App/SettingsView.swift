@@ -41,6 +41,14 @@ struct SettingsView: View {
                             Spacer()
                             StatusPill(status: RobotStatusMonitor.shared.connectionStatus)
                         }
+                        Button {
+                            Task { try? await RobotService.shared.sendMoveCommand(position: "fold") }
+                        } label: {
+                            Label("Rest Arm (tuck up & unload motors)", systemImage: "powersleep")
+                                .font(.sandBody)
+                                .foregroundColor(.sandGold)
+                        }
+                        .buttonStyle(.borderless)
                     }
 
                     Section("Pen Height Calibration") {
@@ -191,28 +199,50 @@ struct SettingsView: View {
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
+            .task { await syncZFromRobot() }
         }
+    }
+
+    private var robotBaseURL: String {
+        "http://\(UserDefaults.standard.string(forKey: "robotHost") ?? "100.95.15.84:8080")"
+    }
+
+    private struct ZResponse: Decodable {
+        let z_height: Double
+        let error: String?
+    }
+
+    /// The Pi owns the pen height; show its value so the first tap is a 1 mm step.
+    private func syncZFromRobot() async {
+        guard let url = URL(string: "\(robotBaseURL)/z-height"),
+              let (data, _) = try? await URLSession.shared.data(from: url),
+              let z = try? JSONDecoder().decode(ZResponse.self, from: data) else { return }
+        drawingZHeight = z.z_height
     }
 
     private func adjustZ(by amount: Double) {
         guard !isCalibrating else { return }
         isCalibrating = true
 
-        let newZ = drawingZHeight + amount
-        drawingZHeight = newZ
 
         Task {
             do {
-                let host = UserDefaults.standard.string(forKey: "robotHost") ?? "100.95.15.84:8080"
-                let url = URL(string: "http://\(host)/set-z")!
+                await syncZFromRobot()  // step from the Pi's real value, not a stale local one
+                let target = drawingZHeight + amount
+                let url = URL(string: "\(robotBaseURL)/set-z")!
                 var request = URLRequest(url: url)
                 request.httpMethod = "POST"
-                request.timeoutInterval = 5
+                request.timeoutInterval = 15  // first move may enable motors and home
                 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                let payload: [String: Double] = ["z_height": newZ]
-                request.httpBody = try JSONSerialization.data(withJSONObject: payload)
-                let (_, _) = try await URLSession.shared.data(for: request)
-                calibrationStatus = "Z set to \(String(format: "%.1f", newZ))mm"
+                request.httpBody = try JSONSerialization.data(withJSONObject: ["z_height": target])
+                let (data, _) = try await URLSession.shared.data(for: request)
+                let result = try JSONDecoder().decode(ZResponse.self, from: data)
+                drawingZHeight = result.z_height
+                if let error = result.error {
+                    calibrationStatus = "Error: \(error)"
+                } else {
+                    calibrationStatus = "Z set to \(String(format: "%.1f", result.z_height))mm"
+                }
             } catch {
                 calibrationStatus = "Error: \(error.localizedDescription)"
             }

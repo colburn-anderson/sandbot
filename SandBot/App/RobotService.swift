@@ -164,7 +164,8 @@ final class LiveRobotService: RobotServiceProtocol {
 
     func fetchJobStatus(jobId: String) async throws -> JobStatus {
         let url = URL(string: "\(baseURL)/job/\(jobId)")!
-        let (data, _) = try await URLSession.shared.data(from: url)
+        let (data, http) = try await URLSession.shared.data(from: url)
+        if (http as? HTTPURLResponse)?.statusCode == 404 { throw RobotError.jobNotFound }
         let response = try JSONDecoder().decode(JobStatusResponse.self, from: data)
         return response.status
     }
@@ -269,12 +270,14 @@ enum RobotError: LocalizedError {
     case invalidImage
     case invalidResponse
     case serverError(String)
+    case jobNotFound
 
     var errorDescription: String? {
         switch self {
         case .invalidImage: return "Could not process image"
         case .invalidResponse: return "Invalid response from robot"
         case .serverError(let msg): return msg
+        case .jobNotFound: return "The robot no longer knows this job (it restarted)."
         }
     }
 }

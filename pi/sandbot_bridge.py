@@ -20,6 +20,7 @@ Run this ON THE PI alongside main.py:
 
 import os
 import io
+import sys
 import time
 import json
 import uuid
@@ -32,6 +33,10 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from boundary import Boundary, reachable
+
+# systemd pipes stdout, which Python block-buffers: without this our
+# [Bridge] log lines never reach journalctl.
+sys.stdout.reconfigure(line_buffering=True)
 
 app = Flask(__name__)
 
@@ -52,8 +57,11 @@ DEFAULT_SHARPEN = 7
 DEFAULT_PEN_UP_HEIGHT = 15
 
 # ── HOME / DRAWING POSITION ─────────────────────────────────────────
-HOME_POSITION = [0.0, 200.0, 58.5]  # X, Y, Z — matches GUI defaults
-FOLD_POSITION = [0.0, 50.0, 130.0]  # folded rest position
+HOME_POSITION = [0.0, 200.0, 58.5]  # X, Y, Z — Z (pen-down height) is overridden from robot_config.json below
+# Resting pose: Freenove's homing (S10) ends with the arm tucked up high
+# (joint zero angles ≈ X0 Y95 Z262). We rest there with motors off. The old
+# fold target (0, 50, 130) is outside the arm's joint limits and was always
+# silently rejected by the arm server.
 
 # ── CAMERA VIEW (REST) POSITION ─────────────────────────────────────
 # Where the arm parks after a drawing: high enough for the arm-mounted
@@ -80,6 +88,10 @@ def save_robot_config(cfg):
 
 def view_position():
     return load_robot_config().get("view_position", DEFAULT_VIEW_POSITION)
+
+
+# Pen-down height survives restarts (paper vs notebook changes it).
+HOME_POSITION[2] = float(load_robot_config().get("draw_z", HOME_POSITION[2]))
 
 # ── IMAGE CANVAS SIZE (derived from the pit's bounding box) ─────────
 def canvas_size():
@@ -124,6 +136,8 @@ class FreenoveClient:
         self.pos = None          # last commanded [x, y, z]; None = unknown
         self.violation = None    # reason the last move was blocked
         self.abort = False       # set by /stop to cut a running batch short
+        self.motors_on = False   # we enabled the steppers (and haven't relaxed them)
+        self.homed = False       # S10 sent since motors were enabled
 
     def connect(self):
         """Connect to the Freenove server."""
@@ -185,6 +199,7 @@ class FreenoveClient:
                 return False
         elif cmd.startswith("S10"):
             self.pos = None  # homing moves the arm to its sensor pose
+            self.homed = True
         try:
             with self.lock:
                 self.sock.sendall((cmd + "\r\n").encode("utf-8"))
@@ -239,11 +254,47 @@ class FreenoveClient:
 
     def enable_motors(self):
         """Send the enable motors command (S8 E0)."""
+        self.motors_on = True
         return self.send("S8 E0")
 
     def disable_motors(self):
         """Send the disable/relax motors command (S8 E1)."""
+        self.motors_on = False
+        self.homed = False
+        self.pos = None
         return self.send("S8 E1")
+
+    def home_high(self):
+        """
+        Home (S10) with the pen lifted. Homing starts with a blind ~7.5°/5°
+        kick of motors 2 and 3 (a few cm of pen travel) before searching for
+        the sensors, so it must never start near the surface.
+        """
+        if self.pos is not None:
+            x, y, z = self.pos
+            if z < boundary.safe_z:
+                if reachable(x, y, boundary.safe_z):
+                    self.move_to(x, y, boundary.safe_z, trusted=True)
+                    time.sleep(2)
+                else:
+                    print(f"[Bridge] WARNING: can't lift at X{x} Y{y} before homing")
+        # pos None = resting/tucked pose after homing or relax, already high.
+        self.send("S10 F1")
+        time.sleep(2.5)
+
+    def ensure_ready(self):
+        """Enable motors and home (safely) once, so a lone move actually moves."""
+        if not self.motors_on:
+            self.enable_motors()
+            time.sleep(0.5)
+        if not self.homed:
+            self.home_high()
+
+    def rest(self):
+        """Tuck the arm up (home, high) and turn the motors off — safe to leave 24/7."""
+        print("[Bridge] Resting: homing up high, then unloading motors")
+        self.home_high()
+        self.disable_motors()
 
     def stop_arm(self):
         """Send emergency stop (S13 N1)."""
@@ -779,20 +830,15 @@ def draw():
             with jobs_lock:
                 jobs[job_id]["status"] = "drawing"
             status_drawing()
-            freenove.enable_motors()
-            time.sleep(0.5)
-            freenove.send("S10 F1")
-            time.sleep(2)
+            freenove.homed = False  # re-home every job to correct drift
+            freenove.ensure_ready()
 
             success = freenove.send_gcode_batch(gcode)
 
-            # Park at the camera view position and photograph the result.
-            # Motors stay enabled: relaxing up there would drop the arm onto the drawing.
-            print("[Bridge] Re-homing before parking...")
-            freenove.send("S10 F1")
-            time.sleep(1.5)
+            # Photograph the result from the camera view, then tuck up and unload.
             park_at_view()
             photo = take_photo(job_id) if success else None
+            freenove.rest()
 
             with jobs_lock:
                 jobs[job_id]["photo"] = bool(photo)
@@ -825,15 +871,23 @@ def draw():
 
 
 def park_at_view():
-    """Lift clear of the rim at home, then go to the camera view position."""
+    """Lift straight up where the pen is, then go to the camera view position."""
     print("[Bridge] Moving to camera view position...")
-    freenove.move_to(HOME_POSITION[0], HOME_POSITION[1], HOME_POSITION[2] + DEFAULT_PEN_UP_HEIGHT)
-    time.sleep(3)
-    freenove.move_to(HOME_POSITION[0], HOME_POSITION[1], boundary.safe_z)  # clear the rim
-    time.sleep(2)
+    if freenove.pos is not None:
+        x, y, _ = freenove.pos
+        if reachable(x, y, boundary.safe_z):
+            freenove.move_to(x, y, boundary.safe_z, trusted=True)  # clear the rim
+            time.sleep(2)
     vx, vy, vz = view_position()
-    freenove.move_to(vx, vy, vz)
+    freenove.move_to(vx, vy, vz, trusted=True)
     time.sleep(4)
+
+
+def fold_and_relax():
+    """End of session: tuck the arm up and turn the motors off."""
+    if freenove.connected:
+        freenove.rest()
+    status_idle()
 
 
 def take_photo(name):
@@ -904,6 +958,7 @@ def move():
         return jsonify({"error": "Not connected"}), 400
     data = request.get_json()
     position = data.get("position", "home")
+    freenove.ensure_ready()
     if position == "home":
         freenove.move_to(HOME_POSITION[0], HOME_POSITION[1], HOME_POSITION[2])
     elif position == "overview":
@@ -911,6 +966,8 @@ def move():
                          HOME_POSITION[2] + DEFAULT_PEN_UP_HEIGHT)
     elif position == "view":
         threading.Thread(target=park_at_view, daemon=True).start()
+    elif position == "fold":
+        threading.Thread(target=fold_and_relax, daemon=True).start()
     return jsonify({"accepted": True})
 
 
@@ -922,17 +979,29 @@ def go_home():
     freenove.move_to(HOME_POSITION[0], HOME_POSITION[1], HOME_POSITION[2])
     return jsonify({"success": True})
 
+@app.route("/z-height", methods=["GET"])
+def get_z_height():
+    return jsonify({"z_height": HOME_POSITION[2]})
+
+
 @app.route("/set-z", methods=["POST"])
 def set_z_height():
-    global HOME_POSITION
-    data = request.get_json()
-    new_z = data.get("z_height", HOME_POSITION[2])
-    HOME_POSITION[2] = float(new_z)
+    """Set the pen-down height, move the pen there at home, and save it."""
+    data = request.get_json() or {}
+    new_z = round(float(data.get("z_height", HOME_POSITION[2])), 1)
+    reason = boundary.check_move(None, (HOME_POSITION[0], HOME_POSITION[1], new_z))
+    if reason:
+        return jsonify({"success": False, "error": reason, "z_height": HOME_POSITION[2]}), 400
+    HOME_POSITION[2] = new_z
+    cfg = load_robot_config()
+    cfg["draw_z"] = new_z
+    save_robot_config(cfg)
     if freenove.connected:
         status_calibrating()
-        freenove.send(f"G0 X0 Y200 Z{HOME_POSITION[2]}")
-    print(f"[Bridge] Z height updated to {HOME_POSITION[2]}mm")
-    return jsonify({"success": True, "z_height": HOME_POSITION[2]})
+        freenove.ensure_ready()
+        freenove.move_to(HOME_POSITION[0], HOME_POSITION[1], new_z)
+    print(f"[Bridge] Z height updated to {new_z}mm")
+    return jsonify({"success": True, "z_height": new_z})
 
 # ════════════════════════════════════════════════════════════════════
 # SAND PIT BOUNDARY + CALIBRATION
@@ -1014,10 +1083,7 @@ def calibrate_start():
     if not freenove.connected:
         return jsonify({"error": "Not connected"}), 400
     status_calibrating()
-    freenove.enable_motors()
-    time.sleep(0.5)
-    freenove.send("S10 F1")
-    time.sleep(2)
+    freenove.ensure_ready()
     freenove.move_to(HOME_POSITION[0], HOME_POSITION[1],
                      HOME_POSITION[2] + DEFAULT_PEN_UP_HEIGHT, trusted=True)
     calibration_points.clear()
@@ -1073,15 +1139,13 @@ def calibrate_save():
 
 @app.route("/calibrate/finish", methods=["POST"])
 def calibrate_finish():
-    """Lift clear of the rim and park at the camera view position (motors stay on)."""
+    """Lift clear of the rim, tuck the arm up and unload the motors."""
     if freenove.connected and freenove.pos is not None:
         x, y, _ = freenove.pos
         if reachable(x, y, boundary.safe_z):
             freenove.move_to(x, y, boundary.safe_z, trusted=True)
             time.sleep(2)
-        vx, vy, vz = view_position()
-        freenove.move_to(vx, vy, vz, trusted=True)
-        time.sleep(3)
+        freenove.rest()
     status_idle()
     return get_position()
 
