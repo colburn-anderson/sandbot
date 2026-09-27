@@ -34,10 +34,8 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				App/AIPatternView.swift,
-				App/ClaudeService.swift,
 				App/Colors.swift,
 				App/ComposeView.swift,
-				App/config.swift,
 				App/ContentView.swift,
 				"App/DancingScript-Bold.ttf",
 				App/DrawingInstruction.swift,
@@ -79,10 +77,8 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				App/AIPatternView.swift,
-				App/ClaudeService.swift,
 				App/Colors.swift,
 				App/ComposeView.swift,
-				App/config.swift,
 				App/ContentView.swift,
 				App/DrawingInstruction.swift,
 				App/HistoryCardView.swift,
