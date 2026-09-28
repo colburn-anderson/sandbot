@@ -26,6 +26,7 @@ final class SendJobManager: ObservableObject {
     /// True while the robot can't be reached mid-job. The Pi keeps drawing on
     /// its own; we keep polling and pick the job back up when it reappears.
     @Published var isReconnecting = false
+    @Published private(set) var isStopping = false
 
     // MARK: - Send Image
 
@@ -87,6 +88,18 @@ final class SendJobManager: ObservableObject {
     func reset() {
         sendState = .idle
         isReconnecting = false
+        isStopping = false
+    }
+
+    /// Graceful stop: the Pi finishes the few queued moves, lifts, tucks up
+    /// and unloads. Polling then reports the job as stopped.
+    func stop() async {
+        isStopping = true
+        do {
+            try await RobotService.shared.stopArm()
+        } catch {
+            isStopping = false
+        }
     }
 
     // MARK: - Catch up on jobs that finished while the app wasn't watching
@@ -168,7 +181,10 @@ final class SendJobManager: ObservableObject {
                 case .failed:
                     entry.status = .failed
                     try? context.save()
-                    sendState = .failed("The drawing failed partway through.")
+                    sendState = .failed(isStopping
+                        ? "Stopped. The arm tucked up and turned its motors off."
+                        : "The drawing failed partway through.")
+                    isStopping = false
                     return
                 case .drawing, .sent:
                     // Still going — keep the in-progress screen up

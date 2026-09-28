@@ -66,6 +66,13 @@ struct SendSheet: View {
                 case .connecting, .sending, .queued, .drawing:
                     ProgressView()
                         .tint(Color.sandGold)
+                    if case .drawing = sendManager.sendState {
+                        PrimaryButton(
+                            title: sendManager.isStopping ? "Stopping…" : "Stop Drawing",
+                            action: { Task { await sendManager.stop() } },
+                            isDisabled: sendManager.isStopping
+                        )
+                    }
                     // Closing is safe: the robot finishes and History catches up later.
                     PrimaryButton(title: "Close", action: { dismiss() }, style: .secondary)
 
@@ -122,6 +129,9 @@ struct SendSheet: View {
         case .queued:     return "The robot is drawing now."
         case .success:    return "Check History for updates."
         case .drawing:
+            if sendManager.isStopping {
+                return "Stopping — finishing the last few moves, then lifting and tucking up."
+            }
             if sendManager.isReconnecting {
                 return "Lost connection to the robot — it keeps drawing on its own. Reconnecting…"
             }

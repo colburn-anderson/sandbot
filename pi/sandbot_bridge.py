@@ -104,8 +104,8 @@ def px_to_mm(px, py, size):
     """Canvas pixel → arm (x, y) in mm."""
     min_x, min_y, max_x, max_y = boundary.bbox()
     w, h = size
-    return (round(min_x + (max_x - min_x) * px / w, 1),
-            round(max_y - (max_y - min_y) * py / h, 1))
+    return (round(float(min_x + (max_x - min_x) * px / w), 1),
+            round(float(max_y - (max_y - min_y) * py / h), 1))
 
 
 def mm_to_px(x, y, size):
@@ -117,6 +117,29 @@ def mm_to_px(x, y, size):
 # ── JOB TRACKING ────────────────────────────────────────────────────
 jobs = {}  # job_id -> {status, created_at, label, source, ...}
 jobs_lock = threading.Lock()
+
+# One drawing at a time. Held from the moment a job is accepted until the arm
+# has rested; while held, every other arm-moving endpoint refuses (409).
+robot_busy = threading.Lock()
+current_job = {"id": None, "label": None}
+
+
+def refuse_while_busy(fn):
+    """Decorator: 409 instead of moving the arm while a drawing is running."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        if robot_busy.locked():
+            return jsonify({
+                "success": False,
+                "error": f"Robot is busy drawing \"{current_job['label']}\" — wait for it to finish.",
+                "busy": True,
+                "job_id": current_job["id"],
+                "z_height": HOME_POSITION[2],
+            }), 409
+        return fn(*args, **kwargs)
+    return wrapper
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -328,6 +351,10 @@ class FreenoveClient:
         timeout_start = time.time()
 
         while queue:
+            if self.abort:
+                print(f"[Bridge] Stop requested at {sent}/{total}")
+                queue.clear()
+                break
             if self.send_g_code_state and self.arm_command_count < 50:
                 send_num = 50 - self.arm_command_count
                 if len(queue) < send_num:
@@ -522,71 +549,73 @@ def process_image_to_contours(image_bytes, threshold=DEFAULT_THRESHOLD,
     # Find contours (matching GUI: RETR_TREE + CHAIN_APPROX_SIMPLE)
     contours, hierarchy = cv2.findContours(sharpened, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
-    return contours, (CANVAS_WIDTH, CANVAS_HEIGHT)
+    return simplify_contours(contours), (CANVAS_WIDTH, CANVAS_HEIGHT)
 
 
-def render_text_to_image(text, font_name=None, font_size=80):
-    """
-    Render text as a black-on-white image using Pillow,
-    then return as image bytes for the same contour pipeline.
-    """
-    CANVAS_WIDTH, CANVAS_HEIGHT = canvas_size()
+TEXT_SUPERSAMPLE = 3   # render text at 3x so thin script hairlines stay solid
+SIMPLIFY_MM = 0.3      # drop contour points that change the line by < 0.3 mm
 
-    # Create a white canvas
-    img = Image.new("RGB", (CANVAS_WIDTH, CANVAS_HEIGHT), (255, 255, 255))
-    draw = ImageDraw.Draw(img)
 
-    # Try to load the specified font, fall back to default
-    font = None
+def load_font(font_name, font_size):
+    """Find a font by name in ~/fonts or the system fonts; DejaVu Sans fallback."""
     if font_name:
-        # Try with and without .ttf extension
-        names_to_try = [font_name, f"{font_name}.ttf", f"{font_name}.otf"]
-        search_dirs = [
-            "/home/tallergiraffe/fonts",
-            "/usr/share/fonts/truetype",
-            "/usr/share/fonts",
-        ]
-        for name in names_to_try:
+        search_dirs = ["/home/tallergiraffe/fonts", "/usr/share/fonts/truetype", "/usr/share/fonts"]
+        for name in (font_name, f"{font_name}.ttf", f"{font_name}.otf"):
             for directory in search_dirs:
                 path = os.path.join(directory, name)
                 if os.path.exists(path):
                     try:
                         font = ImageFont.truetype(path, font_size)
                         print(f"[Bridge] Loaded font: {path}")
-                        break
-                    except:
+                        return font
+                    except OSError:
                         continue
-            if font:
-                break
+    try:
+        return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_size)
+    except OSError:
+        return ImageFont.load_default()
 
 
-    if font is None:
-        try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_size)
-        except:
-            font = ImageFont.load_default()
+def text_to_contours(text, font_name=None, font_size=80):
+    """
+    Text → letter outlines in canvas pixels (floats), centred in the pit.
 
-    # Get text bounding box and center it
-    bbox = draw.textbbox((0, 0), text, font=font)
-    text_w = bbox[2] - bbox[0]
-    text_h = bbox[3] - bbox[1]
-    x = (CANVAS_WIDTH - text_w) // 2
-    y = (CANVAS_HEIGHT - text_h) // 2
-    draw.text((x, y), text, fill=(0, 0, 0), font=font)
+    Text is clean vector art, so it skips the photo filters (blur/sharpen),
+    which break thin script hairlines into dots. It's rendered at 3x and
+    each outline is simplified to within SIMPLIFY_MM, so cursive stays
+    connected and draws with far fewer moves.
+    """
+    w, h = canvas_size()
+    ss = TEXT_SUPERSAMPLE
+    img = Image.new("L", (w * ss, h * ss), 255)
+    draw = ImageDraw.Draw(img)
+    font = load_font(font_name, font_size * ss)
+    left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
+    x = (w * ss - (right - left)) / 2 - left
+    y = (h * ss - (bottom - top)) / 2 - top
+    draw.text((x, y), text, fill=0, font=font)
 
-    # Convert to bytes
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
+    # Letters become the white shapes, so every contour is a real letter
+    # outline (outer edge or the inside of a hole) — no image frame to skip.
+    _, binary = cv2.threshold(np.array(img), 128, 255, cv2.THRESH_BINARY_INV)
+    contours, _ = cv2.findContours(binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
+    eps_px = SIMPLIFY_MM / (MM_PER_PX / ss)
+    return [cv2.approxPolyDP(c, eps_px, True).astype(np.float32) / ss for c in contours], (w, h)
 
 
-def contours_to_strokes(contours, canvas_size):
+def simplify_contours(contours):
+    """Image contours: drop points that change the line by < SIMPLIFY_MM."""
+    return [cv2.approxPolyDP(c, SIMPLIFY_MM / MM_PER_PX, True) for c in contours]
+
+
+def contours_to_strokes(contours, canvas_size, skip_frame=True):
     """
     Contours (canvas pixels) → strokes in arm mm, clipped to the sand pit.
-    Contour 0 is the image's outer frame and is skipped, as in the GUI.
+    For images, contour 0 is the image's outer frame and is skipped, as in
+    the GUI. Text contours have no frame (skip_frame=False).
     """
     strokes = []
-    for i in range(1, len(contours)):
+    for i in range(1 if skip_frame else 0, len(contours)):
         pts = [px_to_mm(px, py, canvas_size) for px, py in (c[0] for c in contours[i])]
         if len(pts) < 2:
             continue
@@ -659,7 +688,8 @@ def render_pit_preview(strokes=None, contours=None, canvas=None):
     poly = np.array([mm_to_px(x, y, size) for x, y in boundary.polygon], np.int32)
     cv2.fillPoly(img, [poly], (214, 232, 242))                # sand (BGR)
     if contours is not None:
-        cv2.drawContours(img, contours, -1, (200, 200, 200), 1)  # full image, faint
+        faint = [np.round(c).astype(np.int32) for c in contours]
+        cv2.drawContours(img, faint, -1, (200, 200, 200), 1)  # full image, faint
     for stroke in strokes or []:
         pts = np.array([mm_to_px(x, y, size) for x, y in stroke], np.int32)
         cv2.polylines(img, [pts], False, (40, 40, 40), 2, cv2.LINE_AA)
@@ -675,10 +705,17 @@ def render_pit_preview(strokes=None, contours=None, canvas=None):
 @app.route("/status", methods=["GET"])
 def get_status():
     """Get robot connection status."""
+    if not freenove.connected:
+        state = "offline"
+    elif robot_busy.locked():
+        state = "drawing"
+    else:
+        state = "idle"
     return jsonify({
-        "state": "idle" if freenove.connected else "offline",
+        "state": state,
         "connected": freenove.connected,
-        "queue_length": 0
+        "queue_length": 1 if robot_busy.locked() else 0,
+        "job_id": current_job["id"],
     })
 
 
@@ -695,6 +732,7 @@ def connect_arm():
 
 
 @app.route("/load", methods=["POST"])
+@refuse_while_busy
 def load_motors():
     """Enable motors."""
     if not freenove.connected:
@@ -704,6 +742,7 @@ def load_motors():
 
 
 @app.route("/relax", methods=["POST"])
+@refuse_while_busy
 def relax_motors():
     """Disable/relax motors."""
     if not freenove.connected:
@@ -714,9 +753,31 @@ def relax_motors():
 
 @app.route("/stop", methods=["POST"])
 def stop_arm():
-    """Emergency stop."""
+    """
+    Graceful stop: stop sending moves, let the few already queued on the arm
+    finish, then lift, tuck up and unload (the running job does this when it
+    sees `abort`). If nothing is drawing, just rest the arm.
+    """
     if not freenove.connected:
         return jsonify({"success": False, "message": "Not connected"}), 400
+    if robot_busy.locked():
+        freenove.abort = True
+        return jsonify({"success": True, "stopping": True, "job_id": current_job["id"]})
+
+    def _rest():
+        with robot_busy:
+            freenove.rest()
+            status_idle()
+    threading.Thread(target=_rest, daemon=True).start()
+    return jsonify({"success": True, "stopping": False})
+
+
+@app.route("/emergency-stop", methods=["POST"])
+def emergency_stop():
+    """
+    Last resort: Freenove's S13 cuts motor power instantly (the arm drops)
+    and exits the arm server; systemd restarts it and this bridge.
+    """
     freenove.abort = True
     freenove.stop_arm()
     return jsonify({"success": True})
@@ -795,18 +856,17 @@ def draw():
             label = text
             source = "text"
 
-            # Render text to image
-            image_bytes = render_text_to_image(text, font_name, font_size)
+            contours, canvas_size = text_to_contours(text, font_name, font_size)
         else:
             return jsonify({"error": "Invalid content type"}), 400
 
-        # Process image → contours
-        contours, canvas_size = process_image_to_contours(
-            image_bytes, threshold, gauss, sharpen
-        )
+        if source == "image":
+            contours, canvas_size = process_image_to_contours(
+                image_bytes, threshold, gauss, sharpen
+            )
 
         # Convert contours → clipped strokes → G-code
-        strokes = contours_to_strokes(contours, canvas_size)
+        strokes = contours_to_strokes(contours, canvas_size, skip_frame=(source == "image"))
         if not strokes:
             return jsonify({"error": "Nothing to draw inside the pit — try adjusting threshold"}), 400
         gcode = strokes_to_gcode(strokes, pen_up_height)
@@ -814,6 +874,15 @@ def draw():
         reason = preflight(gcode)
         if reason:
             return jsonify({"error": f"Blocked by pit boundary: {reason}"}), 400
+
+        # One drawing at a time
+        if not robot_busy.acquire(blocking=False):
+            return jsonify({
+                "error": f"Robot is busy drawing \"{current_job['label']}\" — wait for it to finish.",
+                "busy": True,
+                "job_id": current_job["id"],
+            }), 409
+        current_job.update(id=job_id, label=label)
 
         # Track the job
         with jobs_lock:
@@ -827,6 +896,19 @@ def draw():
 
         # Send G-code in background thread
         def execute_drawing():
+            try:
+                run_job()
+            except Exception:
+                traceback.print_exc()
+                with jobs_lock:
+                    jobs[job_id]["status"] = "failed"
+                    jobs[job_id]["error"] = "Bridge error during drawing — check the log"
+                status_error()
+            finally:
+                current_job.update(id=None, label=None)
+                robot_busy.release()
+
+        def run_job():
             with jobs_lock:
                 jobs[job_id]["status"] = "drawing"
             status_drawing()
@@ -834,16 +916,24 @@ def draw():
             freenove.ensure_ready()
 
             success = freenove.send_gcode_batch(gcode)
+            stopped = freenove.abort
+            if stopped:
+                success = False
 
             # Photograph the result from the camera view, then tuck up and unload.
-            park_at_view()
-            photo = take_photo(job_id) if success else None
+            # A stopped job skips the photo and goes straight to resting.
+            photo = None
+            if not stopped:
+                park_at_view()
+                photo = take_photo(job_id) if success else None
             freenove.rest()
 
             with jobs_lock:
                 jobs[job_id]["photo"] = bool(photo)
                 jobs[job_id]["status"] = "completed" if success else "failed"
-                if freenove.violation:
+                if stopped:
+                    jobs[job_id]["error"] = "Stopped"
+                elif freenove.violation:
                     jobs[job_id]["error"] = f"Blocked by pit boundary: {freenove.violation}"
             if success:
                 status_complete()
@@ -851,13 +941,18 @@ def draw():
                     time.sleep(5)
                     status_idle()
                 threading.Thread(target=_to_idle, daemon=True).start()
+            elif stopped:
+                status_idle()  # a deliberate stop isn't an error
             else:
                 status_error()
 
-        status_receiving()
-
-        thread = threading.Thread(target=execute_drawing, daemon=True)
-        thread.start()
+        try:
+            status_receiving()
+            threading.Thread(target=execute_drawing, daemon=True).start()
+        except Exception:
+            current_job.update(id=None, label=None)
+            robot_busy.release()  # never leave the robot stuck "busy"
+            raise
 
         return jsonify({
             "accepted": True,
@@ -952,6 +1047,7 @@ def get_job_status(job_id):
 
 
 @app.route("/move", methods=["POST"])
+@refuse_while_busy
 def move():
     """Move the arm to a specific position."""
     if not freenove.connected:
@@ -972,6 +1068,7 @@ def move():
 
 
 @app.route("/home", methods=["POST"])
+@refuse_while_busy
 def go_home():
     """Send arm to home position."""
     if not freenove.connected:
@@ -985,6 +1082,7 @@ def get_z_height():
 
 
 @app.route("/set-z", methods=["POST"])
+@refuse_while_busy
 def set_z_height():
     """Set the pen-down height, move the pen there at home, and save it."""
     data = request.get_json() or {}
@@ -1019,6 +1117,7 @@ def get_boundary():
 
 
 @app.route("/boundary", methods=["POST"])
+@refuse_while_busy
 def set_boundary():
     """Replace the outline: {"polygon": [[x, y], ...], "smooth": bool}."""
     data = request.get_json() or {}
@@ -1030,6 +1129,7 @@ def set_boundary():
 
 
 @app.route("/boundary/settings", methods=["POST"])
+@refuse_while_busy
 def set_boundary_settings():
     """{"safe_z": float, "margin_mm": float} — either may be omitted."""
     data = request.get_json() or {}
@@ -1038,6 +1138,7 @@ def set_boundary_settings():
 
 
 @app.route("/boundary/reset", methods=["POST"])
+@refuse_while_busy
 def reset_boundary():
     boundary.reset()
     return get_boundary()
@@ -1051,14 +1152,8 @@ def preview_text():
     if not text:
         return jsonify({"error": "No text provided"}), 400
     try:
-        image_bytes = render_text_to_image(text, data.get("font_name"), data.get("font_size", 80))
-        contours, size = process_image_to_contours(
-            image_bytes,
-            data.get("threshold", DEFAULT_THRESHOLD),
-            data.get("gauss", DEFAULT_GAUSS),
-            data.get("sharpen", DEFAULT_SHARPEN),
-        )
-        strokes = contours_to_strokes(contours, size)
+        contours, size = text_to_contours(text, data.get("font_name"), data.get("font_size", 80))
+        strokes = contours_to_strokes(contours, size, skip_frame=False)
         return send_file(io.BytesIO(render_pit_preview(strokes, contours, size)), mimetype="image/png")
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1078,6 +1173,7 @@ def get_position():
 
 
 @app.route("/calibrate/start", methods=["POST"])
+@refuse_while_busy
 def calibrate_start():
     """Home the arm and park the pen just above the sand at the home point."""
     if not freenove.connected:
@@ -1091,6 +1187,7 @@ def calibrate_start():
 
 
 @app.route("/calibrate/jog", methods=["POST"])
+@refuse_while_busy
 def calibrate_jog():
     """
     Nudge the pen by {"dx", "dy", "dz"} mm, or go to absolute {"x", "y", "z"}.
@@ -1138,6 +1235,7 @@ def calibrate_save():
 
 
 @app.route("/calibrate/finish", methods=["POST"])
+@refuse_while_busy
 def calibrate_finish():
     """Lift clear of the rim, tuck the arm up and unload the motors."""
     if freenove.connected and freenove.pos is not None:

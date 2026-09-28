@@ -15,6 +15,9 @@ import math
 import os
 import threading
 
+import cv2
+import numpy as np
+
 BOUNDARY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "boundary.json")
 
 # Estimated from photos (30 cm wide, ~18 cm deep at the notch, lobes ~5 cm
@@ -37,6 +40,7 @@ DEFAULT_CONFIG = {
 }
 
 SAMPLE_STEP_MM = 2.0
+MASK_RES_MM = 0.25   # resolution of the precomputed "safe to draw" lookup map
 
 # Arm geometry, mirrored from the Freenove server (arm.py / Parameter.json).
 # The server silently ignores moves it can't reach and detours around an
@@ -106,6 +110,7 @@ class Boundary:
         self.path = path
         self.lock = threading.Lock()
         self.config = dict(DEFAULT_CONFIG)
+        self._mask = None
         self.load()
 
     # ── persistence ────────────────────────────────────────────────
@@ -118,6 +123,7 @@ class Boundary:
                 cfg.update(data)
                 self._validate(cfg["polygon"])
                 self.config = cfg
+                self._mask = None
                 print(f"[Boundary] Loaded {len(cfg['polygon'])} points from {self.path}")
                 return
             except Exception as e:
@@ -125,6 +131,7 @@ class Boundary:
         self.config = dict(DEFAULT_CONFIG)
 
     def save(self):
+        self._mask = None  # outline/margin may have changed
         with open(self.path, "w") as f:
             json.dump(self.config, f, indent=2)
 
@@ -181,23 +188,48 @@ class Boundary:
         return d
 
     # ── geometry ───────────────────────────────────────────────────
+    def _build_mask(self):
+        """
+        Rasterise "safe to draw" once: inside the pit, at least `margin` mm
+        from the rim (distance transform), and outside the base keep-out.
+        Point checks become an array lookup instead of a loop over every
+        outline edge (hundreds of times faster on the Pi).
+        """
+        min_x, min_y, max_x, max_y = self.bbox()
+        pad = 2.0
+        x0, y0 = min_x - pad, min_y - pad
+        w = int(math.ceil((max_x - min_x + 2 * pad) / MASK_RES_MM)) + 1
+        h = int(math.ceil((max_y - min_y + 2 * pad) / MASK_RES_MM)) + 1
+        inside = np.zeros((h, w), np.uint8)
+        pts = np.array([[(x - x0) / MASK_RES_MM, (y - y0) / MASK_RES_MM] for x, y in self.polygon])
+        cv2.fillPoly(inside, [np.round(pts).astype(np.int32)], 1)
+        if self.margin > 0:
+            dist_mm = cv2.distanceTransform(inside, cv2.DIST_L2, cv2.DIST_MASK_PRECISE) * MASK_RES_MM
+            # +0.5 mm covers grid rounding, so the lookup never allows a point
+            # closer than `margin` to the rim (it's at most 0.5 mm stricter).
+            safe = dist_mm >= self.margin + 0.5
+        else:
+            safe = inside.astype(bool)
+        gx = x0 + np.arange(w) * MASK_RES_MM
+        gy = y0 + np.arange(h) * MASK_RES_MM
+        safe &= (gx[None, :] ** 2 + gy[:, None] ** 2) >= BASE_KEEPOUT_MM ** 2
+        self._mask = (safe, x0, y0)
+        return self._mask
+
+    def contains_many(self, xs, ys):
+        """Vectorised contains() for numpy arrays of x and y (mm)."""
+        safe, x0, y0 = self._mask or self._build_mask()
+        h, w = safe.shape
+        j = np.round((np.asarray(xs, float) - x0) / MASK_RES_MM).astype(int)
+        i = np.round((np.asarray(ys, float) - y0) / MASK_RES_MM).astype(int)
+        ok = (i >= 0) & (i < h) & (j >= 0) & (j < w)
+        out = np.zeros(ok.shape, bool)
+        out[ok] = safe[i[ok], j[ok]]
+        return out
+
     def contains(self, x, y):
         """Inside the pit, at least `margin` mm from the rim, clear of the base."""
-        if math.hypot(x, y) < BASE_KEEPOUT_MM:
-            return False
-        poly = self.polygon
-        if not _point_in_polygon(x, y, poly):
-            return False
-        m = self.margin
-        if m <= 0:
-            return True
-        n = len(poly)
-        for i in range(n):
-            ax, ay = poly[i]
-            bx, by = poly[(i + 1) % n]
-            if _dist_to_segment(x, y, ax, ay, bx, by) < m:
-                return False
-        return True
+        return bool(self.contains_many(np.array([x]), np.array([y]))[0])
 
     def check_move(self, start, end):
         """
@@ -218,12 +250,15 @@ class Boundary:
         sx, sy, szz = start
         length = math.dist((sx, sy), (ex, ey))
         steps = max(1, int(math.ceil(length / SAMPLE_STEP_MM)))
-        for i in range(1, steps):
-            t = i / steps
-            x, y, z = sx + (ex - sx) * t, sy + (ey - sy) * t, szz + (ez - szz) * t
-            if z < sz and not self.contains(x, y):
-                return (f"path X{sx} Y{sy} → X{ex} Y{ey} leaves the pit near "
-                        f"X{round(x, 1)} Y{round(y, 1)} at Z{round(z, 1)} (below safe Z {sz})")
+        if steps < 2:
+            return None
+        t = np.arange(1, steps) / steps
+        xs, ys, zs = sx + (ex - sx) * t, sy + (ey - sy) * t, szz + (ez - szz) * t
+        bad = (zs < sz) & ~self.contains_many(xs, ys)
+        if bad.any():
+            k = int(np.argmax(bad))
+            return (f"path X{sx} Y{sy} → X{ex} Y{ey} leaves the pit near "
+                    f"X{round(float(xs[k]), 1)} Y{round(float(ys[k]), 1)} at Z{round(float(zs[k]), 1)} (below safe Z {sz})")
         return None
 
     def lift_point(self, x, y, z_travel):
@@ -259,10 +294,15 @@ class Boundary:
             steps = max(1, int(math.ceil(length / SAMPLE_STEP_MM)))
             was_inside = bool(cur)
             last_in = (ax, ay) if was_inside else None
+            ts = np.arange(1, steps + 1) / steps
+            inside_all = self.contains_many(ax + (bx - ax) * ts, ay + (by - ay) * ts)
+            if was_inside and inside_all.all():
+                cur.append((bx, by))  # common case: whole segment inside
+                continue
             for i in range(1, steps + 1):
                 t = i / steps
                 x, y = ax + (bx - ax) * t, ay + (by - ay) * t
-                inside = self.contains(x, y)
+                inside = bool(inside_all[i - 1])
                 if inside and not was_inside:
                     cur = [(round(x, 1), round(y, 1))]
                 elif not inside and was_inside:

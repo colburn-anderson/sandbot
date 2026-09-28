@@ -23,6 +23,12 @@ and goes back to sleep.
 
 ## Drawing quality
 
+- [x] Text pipeline for text: 3x render, no photo filters, outlines simplified
+      to 0.3 mm (script fonts no longer break into dots; ~5x fewer moves).
+- [x] Fast boundary checks (precomputed pit map): drawings prepare in ~0.4 s.
+- [x] Graceful Stop Drawing button (finish queued moves → lift → tuck → unload).
+- [ ] Try a fine pen and re-calibrate pen height for crisper lines.
+
 - [ ] Draw strokes in nearest-next order instead of OpenCV's jumpy order
       (same strokes, less travel, less jumping around).
 - [x] Keep both outlines (outer + inner) for text for now — looks nicer in
@@ -65,8 +71,10 @@ has a **local** API (no cloud): e.g. TP-Link Kasa (python-kasa) or Shelly Plug
 
 ## Security
 
-- [ ] Remove the Anthropic API key and GitHub token from the app binary
-      (`SandBot/App/config.swift`) and rotate both keys.
+- [x] Remove the Anthropic API key and GitHub token from the app binary
+      (`config.swift` and `ClaudeService.swift` deleted, keys revoked 2026-09-27).
+- [x] Block a second drawing while one is running (409 "busy"; arm-moving
+      endpoints refuse mid-job).
 - [ ] Shared access token between app and bridge (Tailscale already limits
       the network to your own devices; this is defence in depth).
 

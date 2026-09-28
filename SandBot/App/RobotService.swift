@@ -61,7 +61,7 @@ final class LiveRobotService: RobotServiceProtocol {
         let url = URL(string: "\(baseURL)/draw")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = 30
+        request.timeoutInterval = 90
 
         let boundary = UUID().uuidString
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
@@ -102,7 +102,7 @@ final class LiveRobotService: RobotServiceProtocol {
         let url = URL(string: "\(baseURL)/draw")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = 30
+        request.timeoutInterval = 90
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
         let payload: [String: Any] = [
