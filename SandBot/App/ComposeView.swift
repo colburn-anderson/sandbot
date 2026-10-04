@@ -20,6 +20,7 @@ struct ComposeView: View {
     @State private var inputText: String = ""
     @State private var fontSize: Double = 80
     @State private var selectedFont: String = "Helvetica-Bold"
+    @State private var textLayout = TextLayout()
 
     // Image state
     @State private var selectedImage: UIImage? = nil
@@ -70,7 +71,7 @@ struct ComposeView: View {
                         // Input area
                         switch selectedTab {
                         case .text:
-                            TextDrawView(inputText: $inputText, fontSize: $fontSize, selectedFont: $selectedFont)
+                            TextDrawView(inputText: $inputText, fontSize: $fontSize, selectedFont: $selectedFont, layout: $textLayout)
                         case .image:
                             ImageDrawView(
                                 previewImage: $previewImage,
@@ -106,6 +107,7 @@ struct ComposeView: View {
                     inputText: sendLabel,
                     fontSize: Int(fontSize),
                     selectedFont: selectedFont,
+                    textLayout: textLayout,
                     selectedImage: selectedImage,
                     threshold: Int(threshold),
                     gauss: Int(gauss),

@@ -19,7 +19,7 @@ final class MockRobotService: RobotServiceProtocol {
         return "mock-\(UUID().uuidString.prefix(6))"
     }
 
-    func sendText(_ text: String, fontSize: Int, fontName: String, threshold: Int, gauss: Int, sharpen: Int, penUpHeight: Int) async throws -> String {
+    func sendText(_ text: String, fontSize: Int, fontName: String, threshold: Int, gauss: Int, sharpen: Int, penUpHeight: Int, layout: TextLayout) async throws -> String {
         try await Task.sleep(nanoseconds: 1_000_000_000)
         return "mock-\(UUID().uuidString.prefix(6))"
     }
@@ -70,7 +70,7 @@ final class MockRobotService: RobotServiceProtocol {
         nil
     }
 
-    func fetchTextPreview(_ text: String, fontSize: Int, fontName: String) async throws -> UIImage {
+    func fetchTextPreview(_ text: String, fontSize: Int, fontName: String, layout: TextLayout) async throws -> TextPreviewStrokes {
         throw RobotError.invalidResponse  // falls back to the on-device preview
     }
 }

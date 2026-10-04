@@ -38,11 +38,17 @@ and goes back to sleep.
 
 ## Text editor preview
 
-- [ ] Much larger text size range (pit fits letters > 10 cm tall).
-- [ ] Drag the text anywhere in the pit on the preview (instant on-device,
+- [x] Much larger text size range (30–450).
+- [x] Drag the text anywhere in the pit on the preview (instant on-device,
       exact server render on release).
-- [ ] Curve slider: bend text along an arc to follow the kidney's top edge or
+- [x] Curve slider: bend text along an arc to follow the kidney's top edge or
       wrap around the notch.
+- [x] Rotation: slider, ±90° buttons, and two-finger twist on the preview.
+- [ ] Curved script text is placed letter by letter; joins between connected
+      letters may not line up on strong curves. Bend the whole word as one
+      shape if it shows.
+- [ ] Pen shows a slight wobble on paper (arm vibration). Check whether it's
+      visible in sand; if so, look at drawing speed / microstepping.
 
 ## Base LEDs (smart plug)
 

@@ -16,7 +16,7 @@ let USE_MOCK_ROBOT = false
 protocol RobotServiceProtocol {
     func fetchStatus() async throws -> RobotStatusResponse
     func sendImage(_ image: UIImage, threshold: Int, gauss: Int, sharpen: Int, penUpHeight: Int, label: String) async throws -> String
-    func sendText(_ text: String, fontSize: Int, fontName: String, threshold: Int, gauss: Int, sharpen: Int, penUpHeight: Int) async throws -> String
+    func sendText(_ text: String, fontSize: Int, fontName: String, threshold: Int, gauss: Int, sharpen: Int, penUpHeight: Int, layout: TextLayout) async throws -> String
     func fetchPreview(_ image: UIImage, threshold: Int, gauss: Int, sharpen: Int) async throws -> UIImage
     func fetchJobStatus(jobId: String) async throws -> JobStatus
     func connectArm() async throws
@@ -25,7 +25,7 @@ protocol RobotServiceProtocol {
     func stopArm() async throws
     func sendMoveCommand(position: String) async throws
     func fetchBoundary() async throws -> PitBoundary
-    func fetchTextPreview(_ text: String, fontSize: Int, fontName: String) async throws -> UIImage
+    func fetchTextPreview(_ text: String, fontSize: Int, fontName: String, layout: TextLayout) async throws -> TextPreviewStrokes
     func fetchJobPhoto(jobId: String) async throws -> Data?
 }
 
@@ -98,7 +98,7 @@ final class LiveRobotService: RobotServiceProtocol {
 
     // MARK: Send text for drawing
 
-    func sendText(_ text: String, fontSize: Int, fontName: String, threshold: Int, gauss: Int, sharpen: Int, penUpHeight: Int) async throws -> String {
+    func sendText(_ text: String, fontSize: Int, fontName: String, threshold: Int, gauss: Int, sharpen: Int, penUpHeight: Int, layout: TextLayout) async throws -> String {
         let url = URL(string: "\(baseURL)/draw")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -113,7 +113,7 @@ final class LiveRobotService: RobotServiceProtocol {
             "gauss": gauss,
             "sharpen": sharpen,
             "pen_up_height": penUpHeight
-        ]
+        ].merging(layout.payload) { _, new in new }
 
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
@@ -215,18 +215,18 @@ extension LiveRobotService {
         return try JSONDecoder().decode(PitBoundary.self, from: data)
     }
 
-    /// Server-rendered preview of text inside the pit — exactly what will be drawn.
-    func fetchTextPreview(_ text: String, fontSize: Int, fontName: String) async throws -> UIImage {
+    /// Exactly what the robot will draw for this text, as strokes in arm mm.
+    func fetchTextPreview(_ text: String, fontSize: Int, fontName: String, layout: TextLayout) async throws -> TextPreviewStrokes {
         var request = URLRequest(url: URL(string: "\(baseURL)/preview-text")!)
         request.httpMethod = "POST"
         request.timeoutInterval = 15
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "text": text, "font_name": fontName, "font_size": fontSize,
-        ])
+        let body: [String: Any] = [
+            "text": text, "font_name": fontName, "font_size": fontSize, "format": "json",
+        ].merging(layout.payload) { _, new in new }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, _) = try await URLSession.shared.data(for: request)
-        guard let image = UIImage(data: data) else { throw RobotError.invalidResponse }
-        return image
+        return try JSONDecoder().decode(TextPreviewStrokes.self, from: data)
     }
 }
 

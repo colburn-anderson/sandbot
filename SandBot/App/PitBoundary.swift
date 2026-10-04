@@ -133,3 +133,38 @@ struct PitBackdrop: View {
         .aspectRatio(boundary.aspectRatio, contentMode: .fit)
     }
 }
+
+/// Where and how text sits in the pit: centre in arm mm (nil = middle of the
+/// pit), curve (-1 dips ∪ around the notch … 0 straight … 1 arches ∩), and
+/// rotation in degrees, counter-clockwise as seen in the preview.
+struct TextLayout: Equatable {
+    var centerX: Double? = nil
+    var centerY: Double? = nil
+    var curve: Double = 0
+    var rotation: Double = 0
+
+    /// Keep rotation in -180…180.
+    static func normalized(_ degrees: Double) -> Double {
+        var d = degrees.truncatingRemainder(dividingBy: 360)
+        if d > 180 { d -= 360 }
+        if d < -180 { d += 360 }
+        return d
+    }
+
+    /// Fields for the bridge's text requests (/draw, /preview-text).
+    var payload: [String: Any] {
+        var p: [String: Any] = ["curve": curve, "rotation": rotation]
+        if let centerX, let centerY {
+            p["center_x"] = centerX
+            p["center_y"] = centerY
+        }
+        return p
+    }
+}
+
+/// Text preview from the bridge, in arm mm: what will be drawn (clipped to
+/// the pit) and the full unclipped outline (shown faintly).
+struct TextPreviewStrokes: Decodable {
+    var strokes: [[[Double]]]
+    var full: [[[Double]]]
+}

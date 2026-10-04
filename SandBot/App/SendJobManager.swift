@@ -57,7 +57,7 @@ final class SendJobManager: ObservableObject {
 
     // MARK: - Send Text
 
-    func sendText(text: String, fontSize: Int, fontName: String, threshold: Int, gauss: Int, sharpen: Int, penUpHeight: Int, context: ModelContext) async {
+    func sendText(text: String, fontSize: Int, fontName: String, threshold: Int, gauss: Int, sharpen: Int, penUpHeight: Int, layout: TextLayout = TextLayout(), context: ModelContext) async {
         sendState = .connecting
         try? await Task.sleep(nanoseconds: 300_000_000)
 
@@ -70,7 +70,8 @@ final class SendJobManager: ObservableObject {
                 threshold: threshold,
                 gauss: gauss,
                 sharpen: sharpen,
-                penUpHeight: penUpHeight
+                penUpHeight: penUpHeight,
+                layout: layout
             )
 
             sendState = .queued

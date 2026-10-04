@@ -19,6 +19,7 @@ Run this ON THE PI alongside main.py:
 """
 
 import os
+import math
 import io
 import sys
 import time
@@ -576,9 +577,55 @@ def load_font(font_name, font_size):
         return ImageFont.load_default()
 
 
-def text_to_contours(text, font_name=None, font_size=80):
+def _draw_curved_text(img, text, font, cx, baseline_y, curve):
     """
-    Text → letter outlines in canvas pixels (floats), centred in the pit.
+    Draw text along a circular arc through (cx, baseline_y), in image pixels.
+    curve > 0 arches up (∩, follows the top of the pit); curve < 0 dips
+    (∪, wraps around the notch). |curve| = 1 bends the line into a half
+    circle. Letters are placed one by one using the font's own spacing
+    (incl. kerning), each rotated to sit on the arc.
+    """
+    total = font.getlength(text)
+    if total <= 0:
+        return
+    radius = total / (abs(curve) * math.pi)
+    sign = 1 if curve > 0 else -1
+    pad = int(font.size * 1.5)
+    canvas = np.array(img)
+    for i, ch in enumerate(text):
+        if ch.isspace():
+            continue
+        mid = font.getlength(text[:i]) + font.getlength(ch) / 2 - total / 2
+        theta = mid / radius
+        px = cx + radius * math.sin(theta)
+        py = baseline_y + sign * radius * (1 - math.cos(theta))
+        glyph = Image.new("L", (2 * pad, 2 * pad), 255)
+        ImageDraw.Draw(glyph).text((pad, pad), ch, fill=0, font=font, anchor="ms")
+        glyph = glyph.rotate(-sign * math.degrees(theta), resample=Image.BICUBIC, fillcolor=255)
+        g = np.array(glyph)
+        x0, y0 = int(round(px)) - pad, int(round(py)) - pad
+        # Paste (darkest wins), clipped to the canvas.
+        ix0, iy0 = max(x0, 0), max(y0, 0)
+        ix1, iy1 = min(x0 + 2 * pad, canvas.shape[1]), min(y0 + 2 * pad, canvas.shape[0])
+        if ix0 >= ix1 or iy0 >= iy1:
+            continue
+        region = canvas[iy0:iy1, ix0:ix1]
+        np.minimum(region, g[iy0 - y0:iy1 - y0, ix0 - x0:ix1 - x0], out=region)
+    img.paste(Image.fromarray(canvas))
+
+
+def text_to_contours(text, font_name=None, font_size=80, center_mm=None, curve=0.0, rotation=0.0):
+    """
+    Text → letter outlines in canvas pixels (floats).
+
+    center_mm: (x, y) in arm mm for the middle of the text; default is the
+    middle of the pit's bounding box. curve: see _draw_curved_text
+    (0 = straight). rotation: degrees, counter-clockwise as seen in the
+    preview, around the text's middle.
+
+    The text is rendered on its own canvas (sized to the text), traced, and
+    the outlines are then rotated and moved into place — so rotation is
+    exact and text near an edge isn't cut off by the canvas.
 
     Text is clean vector art, so it skips the photo filters (blur/sharpen),
     which break thin script hairlines into dots. It's rendered at 3x and
@@ -587,20 +634,55 @@ def text_to_contours(text, font_name=None, font_size=80):
     """
     w, h = canvas_size()
     ss = TEXT_SUPERSAMPLE
-    img = Image.new("L", (w * ss, h * ss), 255)
-    draw = ImageDraw.Draw(img)
-    font = load_font(font_name, font_size * ss)
-    left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
-    x = (w * ss - (right - left)) / 2 - left
-    y = (h * ss - (bottom - top)) / 2 - top
-    draw.text((x, y), text, fill=0, font=font)
+    font = load_font(font_name, int(font_size * ss))
+
+    # Big enough for the text, straight or curved, in any orientation; never
+    # bigger than what could still land inside the pit.
+    probe = ImageDraw.Draw(Image.new("L", (1, 1)))
+    _, top, _, bottom = probe.textbbox((0, 0), text, font=font, anchor="ls")
+    reach = math.hypot(font.getlength(text) / 2, bottom - top) + font.size
+    reach = min(reach, math.hypot(w, h) * ss)
+    side = int(2 * reach) + 2
+    img = Image.new("L", (side, side), 255)
+    lc = side / 2  # local centre
+
+    # Vertical middle of the text relative to its baseline, so straight and
+    # curved text are centred on the same point.
+    baseline_y = lc - (top + bottom) / 2
+    curve = max(-1.0, min(1.0, float(curve or 0)))
+    if abs(curve) < 0.02:
+        ImageDraw.Draw(img).text((lc, baseline_y), text, fill=0, font=font, anchor="ms")
+    else:
+        _draw_curved_text(img, text, font, lc, baseline_y, curve)
 
     # Letters become the white shapes, so every contour is a real letter
     # outline (outer edge or the inside of a hole) — no image frame to skip.
     _, binary = cv2.threshold(np.array(img), 128, 255, cv2.THRESH_BINARY_INV)
     contours, _ = cv2.findContours(binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
     eps_px = SIMPLIFY_MM / (MM_PER_PX / ss)
-    return [cv2.approxPolyDP(c, eps_px, True).astype(np.float32) / ss for c in contours], (w, h)
+
+    # Place: rotate about the local centre, then move to the target centre.
+    if center_mm is None:
+        cx, cy = w / 2, h / 2
+    else:
+        cx, cy = mm_to_px(center_mm[0], center_mm[1], (w, h))
+    a = math.radians(float(rotation or 0))
+    cos_a, sin_a = math.cos(a), math.sin(a)
+    # Image y points down, so counter-clockwise on screen is this matrix.
+    rot = np.array([[cos_a, sin_a], [-sin_a, cos_a]], np.float32)
+    placed = []
+    for c in contours:
+        pts = cv2.approxPolyDP(c, eps_px, True).reshape(-1, 2).astype(np.float32)
+        pts = ((pts - lc) @ rot.T) / ss + np.array([cx, cy], np.float32)
+        placed.append(pts.reshape(-1, 1, 2))
+    return placed, (w, h)
+
+
+def text_center(data):
+    """Optional "center_x"/"center_y" (arm mm) from a text request."""
+    if data.get("center_x") is None or data.get("center_y") is None:
+        return None
+    return float(data["center_x"]), float(data["center_y"])
 
 
 def simplify_contours(contours):
@@ -856,7 +938,8 @@ def draw():
             label = text
             source = "text"
 
-            contours, canvas_size = text_to_contours(text, font_name, font_size)
+            contours, canvas_size = text_to_contours(
+                text, font_name, font_size, text_center(data), data.get("curve", 0), data.get("rotation", 0))
         else:
             return jsonify({"error": "Invalid content type"}), 400
 
@@ -1152,8 +1235,15 @@ def preview_text():
     if not text:
         return jsonify({"error": "No text provided"}), 400
     try:
-        contours, size = text_to_contours(text, data.get("font_name"), data.get("font_size", 80))
+        contours, size = text_to_contours(text, data.get("font_name"), data.get("font_size", 80),
+                                          text_center(data), data.get("curve", 0), data.get("rotation", 0))
         strokes = contours_to_strokes(contours, size, skip_frame=False)
+        if data.get("format") == "json":
+            # The app draws these itself so it can drag them around instantly.
+            # "strokes" = what will be drawn (clipped, mm); "full" = the whole
+            # unclipped outline, shown faintly so clipped parts are visible.
+            full = [[list(px_to_mm(float(x), float(y), size)) for x, y in (pt[0] for pt in c)] for c in contours]
+            return jsonify({"strokes": [[list(p) for p in st] for st in strokes], "full": full})
         return send_file(io.BytesIO(render_pit_preview(strokes, contours, size)), mimetype="image/png")
     except Exception as e:
         return jsonify({"error": str(e)}), 500
