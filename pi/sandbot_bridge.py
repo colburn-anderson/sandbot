@@ -93,6 +93,11 @@ def view_position():
 
 # Pen-down height survives restarts (paper vs notebook changes it).
 HOME_POSITION[2] = float(load_robot_config().get("draw_z", HOME_POSITION[2]))
+boundary.surface_z = HOME_POSITION[2]  # rim crossing height follows the surface
+
+# Homing starts with a blind kick of a few cm, so lift at least this far
+# above the drawing surface before homing.
+HOMING_LIFT_MM = 60.0
 
 # ── IMAGE CANVAS SIZE (derived from the pit's bounding box) ─────────
 def canvas_size():
@@ -296,9 +301,10 @@ class FreenoveClient:
         """
         if self.pos is not None:
             x, y, z = self.pos
-            if z < boundary.safe_z:
-                if reachable(x, y, boundary.safe_z):
-                    self.move_to(x, y, boundary.safe_z, trusted=True)
+            lift_z = max(boundary.safe_z, HOME_POSITION[2] + HOMING_LIFT_MM)
+            if z < lift_z:
+                if reachable(x, y, lift_z):
+                    self.move_to(x, y, lift_z, trusted=True)
                     time.sleep(2)
                 else:
                     print(f"[Bridge] WARNING: can't lift at X{x} Y{y} before homing")
@@ -373,7 +379,8 @@ class FreenoveClient:
             else:
                 time.sleep(0.01)
 
-            if time.time() - timeout_start > 600:
+            # Safety net only: generous enough for the longest allowed drawing.
+            if time.time() - timeout_start > (MAX_DRAW_MINUTES * 2 + 10) * 60:
                 print(f"[Bridge] Timeout at {sent}/{total}")
                 break
 
@@ -501,56 +508,136 @@ def map_value(value, from_low, from_high, to_low, to_high):
     return round((to_high - to_low) * (value - from_low) / (from_high - from_low) + to_low, 1)
 
 
-def process_image_to_contours(image_bytes, threshold=DEFAULT_THRESHOLD,
-                               gauss=DEFAULT_GAUSS, sharpen=DEFAULT_SHARPEN):
+def image_ink(image_bytes):
     """
-    Run the exact same OpenCV pipeline as the Freenove GUI:
-    raw image → resize to canvas → grayscale → threshold → blur → sharpen → contour
-    Returns (contours_data, canvas_size).
+    Picture → "ink" image: dark-on-white gray at 2x canvas resolution, where
+    darkness = how different each pixel's colour is from the background
+    (median colour of the picture's border). Works for any colours: dark on
+    light, white on blue, teal on white, blue-grey on light grey.
     """
-    # Decode image
     nparr = np.frombuffer(image_bytes, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    if img is None:
+    color = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if color is None:
         raise ValueError("Could not decode image")
+    lab = cv2.cvtColor(color, cv2.COLOR_BGR2LAB).astype(np.float32)
+    border = np.concatenate([lab[0], lab[-1], lab[:, 0], lab[:, -1]])
+    background = np.median(border, axis=0)
+    ink = np.linalg.norm(lab - background, axis=2)
+    ink_scale = max(float(np.percentile(ink, 99)), 25.0)  # don't amplify noise on blank pictures
+    gray = (255 - np.clip(ink / ink_scale * 255, 0, 255)).astype(np.uint8)
 
-    CANVAS_WIDTH, CANVAS_HEIGHT = canvas_size()
+    # Work at 2x canvas resolution, scaling small images up and big ones down.
+    w, h = canvas_size()
+    gh, gw = gray.shape
+    f = 2 * min((w - 8) / gw, (h - 8) / gh)
+    gray = cv2.resize(gray, (max(1, int(gw * f)), max(1, int(gh * f))),
+                      interpolation=cv2.INTER_AREA if f < 1 else cv2.INTER_CUBIC)
+    return cv2.copyMakeBorder(gray, 8, 8, 8, 8, cv2.BORDER_CONSTANT, value=255)
 
-    # Resize to fit canvas (matching GUI's import logic)
-    white_image = np.zeros((CANVAS_HEIGHT, CANVAS_WIDTH, 3), dtype=np.uint8)
-    white_image[:, :, :] = [255, 255, 255]
 
-    img_h, img_w = img.shape[:2]
-    if img_h <= CANVAS_HEIGHT and img_w <= CANVAS_WIDTH:
-        center = ((CANVAS_HEIGHT - img_h) // 2, (CANVAS_WIDTH - img_w) // 2)
-        white_image[center[0]:center[0] + img_h, center[1]:center[1] + img_w] = img
-    else:
-        scale = min((CANVAS_HEIGHT - 2) / img_h, (CANVAS_WIDTH - 2) / img_w)
-        new_h = int(scale * img_h)
-        new_w = int(scale * img_w)
-        resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-        center = ((CANVAS_HEIGHT - new_h) // 2, (CANVAS_WIDTH - new_w) // 2)
-        white_image[center[0]:center[0] + new_h, center[1]:center[1] + new_w] = resized
-
-    raw_img = white_image.copy()
-
-    # Grayscale
-    gray = cv2.cvtColor(raw_img, cv2.COLOR_BGR2GRAY)
-
-    # Ensure gauss is odd
+def line_binary(gray, threshold, gauss, sharpen):
+    """Ink image → pure black lines on white, with the user's filter settings."""
     if gauss % 2 == 0:
         gauss += 1
-
-    # Binary threshold + Gaussian blur + sharpen
     _, binary = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
+    # Close small gaps in the (dark) lines so they trace as one piece.
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     blurred = cv2.GaussianBlur(binary, (gauss, gauss), 0, 0)
     kernel = np.array([[0, -1, 0], [-1, sharpen, -1], [0, -1, 0]], np.float32)
     sharpened = cv2.filter2D(blurred, -1, kernel=kernel)
+    # Back to pure black/white: findContours treats any non-zero pixel as
+    # background, so a thin line whose middle the blur lightened even
+    # slightly would otherwise vanish or break into dashes.
+    _, sharpened = cv2.threshold(sharpened, 127, 255, cv2.THRESH_BINARY)
+    return sharpened
 
-    # Find contours (matching GUI: RETR_TREE + CHAIN_APPROX_SIMPLE)
-    contours, hierarchy = cv2.findContours(sharpened, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
-    return simplify_contours(contours), (CANVAS_WIDTH, CANVAS_HEIGHT)
+def auto_image_settings(image_bytes):
+    """
+    Pick threshold / blur / sharpen for this picture by trying combinations
+    and scoring each against the original: the traced lines should sit where
+    the picture's lines are (precision), cover all of them (recall), and not
+    break into specks. The reference is the picture's own lines found with
+    Otsu's automatic threshold.
+    """
+    gray = image_ink(image_bytes)
+    otsu, ref = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    near = np.ones((3, 3), np.uint8)
+    ref_near = cv2.dilate(ref, near, iterations=1) > 0
+    ref_on = ref > 0
+    ref_count = max(int(ref_on.sum()), 1)
+    best = None
+    thresholds = sorted({int(np.clip(otsu + d, 60, 240)) for d in (-70, -45, -20, 0, 20, 45, 70)})
+    for t in thresholds:
+        for g in (1, 3, 5):
+            for sh in (5, 7, 9):
+                cand = line_binary(gray, t, g, sh) == 0          # True = line
+                count = int(cand.sum())
+                if count == 0:
+                    continue
+                precision = float((cand & ref_near).sum()) / count
+                cand_near = cv2.dilate(cand.astype(np.uint8), near, iterations=1) > 0
+                recall = float((ref_on & cand_near).sum()) / ref_count
+                f1 = 2 * precision * recall / max(precision + recall, 1e-6)
+                n, _, stats, _ = cv2.connectedComponentsWithStats(cand.astype(np.uint8), connectivity=8)
+                areas = stats[1:, cv2.CC_STAT_AREA]
+                specks = float((areas < 40).sum()) / max(len(areas), 1)
+                score = f1 - 0.35 * specks
+                # Ties: fewer separate pieces (more connected lines), then the
+                # threshold closest to the picture's own (Otsu).
+                key = (round(score, 3), -len(areas), -abs(t - otsu))
+                if best is None or key > best[0]:
+                    best = (key, t, g, sh)
+    if best is None:
+        return {"threshold": DEFAULT_THRESHOLD, "gauss": DEFAULT_GAUSS, "sharpen": DEFAULT_SHARPEN, "score": 0.0}
+    (score, _, _), t, g, sh = best
+    return {"threshold": t, "gauss": g, "sharpen": sh, "score": round(score, 3)}
+
+
+def image_to_contours(image_bytes, threshold=DEFAULT_THRESHOLD, gauss=DEFAULT_GAUSS,
+                       sharpen=DEFAULT_SHARPEN, layout=None):
+    """
+    Image → line outlines in canvas pixels, placed per `layout`.
+
+    Threshold → blur → sharpen → contour, like the Freenove GUI, but:
+    - lines are found by how different their colour is from the background
+      (median colour of the picture's border), so any colours work: dark on
+      light, white on blue, teal on white, blue-grey on light grey,
+    - it works at 2x the canvas resolution and closes 1–2 px gaps, so thin
+      lines stay continuous instead of breaking into dots,
+    - frames (anything spanning nearly the whole picture both ways) are
+      dropped, and the result is cropped to the actual drawing,
+    - the drawing is scaled to fit the pit, then bent/rotated/moved by
+      `layout` (scale 1.0 = fits the pit with a little room).
+    `threshold` keeps its meaning: higher picks up fainter lines.
+    """
+    layout = layout or {}
+    w, h = canvas_size()
+    sharpened = line_binary(image_ink(image_bytes), threshold, gauss, sharpen)
+    contours, _ = cv2.findContours(sharpened, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
+
+    # Drop frames: anything spanning (nearly) the whole picture both ways —
+    # the white padding's outline, a drawn border, a leftover background box.
+    # Lines that merely run off one edge (e.g. a wave band) are kept.
+    ih, iw = sharpened.shape
+    keep = []
+    for c in contours:
+        _, _, bw, bh = cv2.boundingRect(c)
+        if bw >= 0.92 * iw and bh >= 0.92 * ih:
+            continue
+        keep.append(c)
+    if not keep:
+        return [], (w, h)
+
+    # Crop to the drawing and fit it in the pit.
+    allpts = np.vstack([c.reshape(-1, 2) for c in keep])
+    x0, y0 = allpts.min(axis=0)
+    x1, y1 = allpts.max(axis=0)
+    cw, ch = max(float(x1 - x0), 1.0), max(float(y1 - y0), 1.0)
+    fit = 0.85 * min(w / cw, h / ch)
+    scale = max(0.05, float(layout.get("scale", 1.0) or 1.0))
+    return place_contours(keep, origin=((x0 + x1) / 2, (y0 + y1) / 2), local_to_canvas=fit * scale,
+                          width_local=cw, layout=layout), (w, h)
 
 
 TEXT_SUPERSAMPLE = 3   # render text at 3x so thin script hairlines stay solid
@@ -577,133 +664,155 @@ def load_font(font_name, font_size):
         return ImageFont.load_default()
 
 
-def _draw_curved_text(img, text, font, cx, baseline_y, curve):
+def place_contours(contours, origin, local_to_canvas, width_local, layout):
     """
-    Draw text along a circular arc through (cx, baseline_y), in image pixels.
-    curve > 0 arches up (∩, follows the top of the pit); curve < 0 dips
-    (∪, wraps around the notch). |curve| = 1 bends the line into a half
-    circle. Letters are placed one by one using the font's own spacing
-    (incl. kerning), each rotated to sit on the arc.
+    Put traced outlines into the canvas: bend along an arc (layout "curve"),
+    rotate (layout "rotation", degrees counter-clockwise on screen), scale,
+    and move so `origin` lands on the layout centre. Shared by text and images.
+
+    curve > 0 arches the shape up (∩, follows the top of the pit); curve < 0
+    dips it (∪, wraps around the notch); |curve| = 1 bends its full width
+    into a half circle. The whole shape bends as one piece, so connected
+    script letters stay joined.
     """
-    total = font.getlength(text)
-    if total <= 0:
-        return
-    radius = total / (abs(curve) * math.pi)
-    sign = 1 if curve > 0 else -1
-    pad = int(font.size * 1.5)
-    canvas = np.array(img)
-    for i, ch in enumerate(text):
-        if ch.isspace():
-            continue
-        mid = font.getlength(text[:i]) + font.getlength(ch) / 2 - total / 2
-        theta = mid / radius
-        px = cx + radius * math.sin(theta)
-        py = baseline_y + sign * radius * (1 - math.cos(theta))
-        glyph = Image.new("L", (2 * pad, 2 * pad), 255)
-        ImageDraw.Draw(glyph).text((pad, pad), ch, fill=0, font=font, anchor="ms")
-        glyph = glyph.rotate(-sign * math.degrees(theta), resample=Image.BICUBIC, fillcolor=255)
-        g = np.array(glyph)
-        x0, y0 = int(round(px)) - pad, int(round(py)) - pad
-        # Paste (darkest wins), clipped to the canvas.
-        ix0, iy0 = max(x0, 0), max(y0, 0)
-        ix1, iy1 = min(x0 + 2 * pad, canvas.shape[1]), min(y0 + 2 * pad, canvas.shape[0])
-        if ix0 >= ix1 or iy0 >= iy1:
-            continue
-        region = canvas[iy0:iy1, ix0:ix1]
-        np.minimum(region, g[iy0 - y0:iy1 - y0, ix0 - x0:ix1 - x0], out=region)
-    img.paste(Image.fromarray(canvas))
+    w, h = canvas_size()
+    center = layout.get("center")
+    cx, cy = (w / 2, h / 2) if center is None else mm_to_px(center[0], center[1], (w, h))
+    curve = max(-1.0, min(1.0, float(layout.get("curve", 0) or 0)))
+    a = math.radians(float(layout.get("rotation", 0) or 0))
+    # Image y points down, so counter-clockwise on screen is this matrix.
+    rot = np.array([[math.cos(a), math.sin(a)], [-math.sin(a), math.cos(a)]])
+    eps = SIMPLIFY_MM / MM_PER_PX
+    placed = []
+    for c in contours:
+        pts = c.reshape(-1, 2).astype(np.float64) - np.asarray(origin, np.float64)
+        if abs(curve) >= 0.02 and width_local > 0:
+            radius = width_local / (math.pi * abs(curve))
+            u, v = pts[:, 0], pts[:, 1]
+            theta = u / radius
+            if curve > 0:   # arch: circle centre below the shape
+                rho = radius - v
+                pts = np.stack([rho * np.sin(theta), radius - rho * np.cos(theta)], axis=1)
+            else:           # dip: circle centre above the shape
+                rho = radius + v
+                pts = np.stack([rho * np.sin(theta), -radius + rho * np.cos(theta)], axis=1)
+        pts = (pts @ rot.T) * local_to_canvas + np.array([cx, cy])
+        simplified = cv2.approxPolyDP(pts.astype(np.float32).reshape(-1, 1, 2), eps, True)
+        if len(simplified) >= 2:
+            placed.append(simplified)
+    return placed
 
 
-def text_to_contours(text, font_name=None, font_size=80, center_mm=None, curve=0.0, rotation=0.0):
+def layout_from(data):
+    """Layout fields from a request (JSON body or multipart form)."""
+    def num(key, default):
+        v = data.get(key)
+        return default if v in (None, "") else float(v)
+    cx, cy = data.get("center_x"), data.get("center_y")
+    center = None if cx in (None, "") or cy in (None, "") else (float(cx), float(cy))
+    return {"center": center, "curve": num("curve", 0.0),
+            "rotation": num("rotation", 0.0), "scale": num("scale", 1.0)}
+
+
+def text_to_contours(text, font_name=None, font_size=80, layout=None):
     """
-    Text → letter outlines in canvas pixels (floats).
-
-    center_mm: (x, y) in arm mm for the middle of the text; default is the
-    middle of the pit's bounding box. curve: see _draw_curved_text
-    (0 = straight). rotation: degrees, counter-clockwise as seen in the
-    preview, around the text's middle.
-
-    The text is rendered on its own canvas (sized to the text), traced, and
-    the outlines are then rotated and moved into place — so rotation is
-    exact and text near an edge isn't cut off by the canvas.
+    Text → letter outlines in canvas pixels, placed per `layout`
+    (centre, curve, rotation — see place_contours).
 
     Text is clean vector art, so it skips the photo filters (blur/sharpen),
-    which break thin script hairlines into dots. It's rendered at 3x and
-    each outline is simplified to within SIMPLIFY_MM, so cursive stays
-    connected and draws with far fewer moves.
+    which break thin script hairlines into dots. It's rendered at 3x on its
+    own canvas and traced, then placed; outlines are simplified to within
+    SIMPLIFY_MM, so cursive stays connected and draws with few moves.
     """
+    layout = layout or {}
     w, h = canvas_size()
     ss = TEXT_SUPERSAMPLE
     font = load_font(font_name, int(font_size * ss))
 
-    # Big enough for the text, straight or curved, in any orientation; never
-    # bigger than what could still land inside the pit.
     probe = ImageDraw.Draw(Image.new("L", (1, 1)))
     _, top, _, bottom = probe.textbbox((0, 0), text, font=font, anchor="ls")
-    reach = math.hypot(font.getlength(text) / 2, bottom - top) + font.size
-    reach = min(reach, math.hypot(w, h) * ss)
+    length = font.getlength(text)
+    reach = math.hypot(length / 2, bottom - top) + font.size
+    reach = min(reach, 2 * math.hypot(w, h) * ss)
     side = int(2 * reach) + 2
     img = Image.new("L", (side, side), 255)
-    lc = side / 2  # local centre
-
-    # Vertical middle of the text relative to its baseline, so straight and
-    # curved text are centred on the same point.
-    baseline_y = lc - (top + bottom) / 2
-    curve = max(-1.0, min(1.0, float(curve or 0)))
-    if abs(curve) < 0.02:
-        ImageDraw.Draw(img).text((lc, baseline_y), text, fill=0, font=font, anchor="ms")
-    else:
-        _draw_curved_text(img, text, font, lc, baseline_y, curve)
+    lc = side / 2
+    # Centre on the text's vertical middle (from the font's own metrics).
+    ImageDraw.Draw(img).text((lc, lc - (top + bottom) / 2), text, fill=0, font=font, anchor="ms")
 
     # Letters become the white shapes, so every contour is a real letter
     # outline (outer edge or the inside of a hole) — no image frame to skip.
     _, binary = cv2.threshold(np.array(img), 128, 255, cv2.THRESH_BINARY_INV)
     contours, _ = cv2.findContours(binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
-    eps_px = SIMPLIFY_MM / (MM_PER_PX / ss)
-
-    # Place: rotate about the local centre, then move to the target centre.
-    if center_mm is None:
-        cx, cy = w / 2, h / 2
-    else:
-        cx, cy = mm_to_px(center_mm[0], center_mm[1], (w, h))
-    a = math.radians(float(rotation or 0))
-    cos_a, sin_a = math.cos(a), math.sin(a)
-    # Image y points down, so counter-clockwise on screen is this matrix.
-    rot = np.array([[cos_a, sin_a], [-sin_a, cos_a]], np.float32)
-    placed = []
-    for c in contours:
-        pts = cv2.approxPolyDP(c, eps_px, True).reshape(-1, 2).astype(np.float32)
-        pts = ((pts - lc) @ rot.T) / ss + np.array([cx, cy], np.float32)
-        placed.append(pts.reshape(-1, 1, 2))
-    return placed, (w, h)
+    return place_contours(contours, origin=(lc, lc), local_to_canvas=1 / ss,
+                          width_local=length, layout=layout), (w, h)
 
 
-def text_center(data):
-    """Optional "center_x"/"center_y" (arm mm) from a text request."""
-    if data.get("center_x") is None or data.get("center_y") is None:
-        return None
-    return float(data["center_x"]), float(data["center_y"])
+MIN_STROKE_MM = 3.0   # shorter pieces are specks/noise: a pen dab, not a line
 
 
-def simplify_contours(contours):
-    """Image contours: drop points that change the line by < SIMPLIFY_MM."""
-    return [cv2.approxPolyDP(c, SIMPLIFY_MM / MM_PER_PX, True) for c in contours]
+def stroke_length(stroke):
+    return sum(math.dist(a, b) for a, b in zip(stroke, stroke[1:]))
 
 
-def contours_to_strokes(contours, canvas_size, skip_frame=True):
+def contours_to_strokes(contours, canvas_size):
     """
     Contours (canvas pixels) → strokes in arm mm, clipped to the sand pit.
-    For images, contour 0 is the image's outer frame and is skipped, as in
-    the GUI. Text contours have no frame (skip_frame=False).
+    Pieces shorter than MIN_STROKE_MM are dropped (they draw as dots).
     """
     strokes = []
-    for i in range(1 if skip_frame else 0, len(contours)):
+    for i in range(len(contours)):
         pts = [px_to_mm(px, py, canvas_size) for px, py in (c[0] for c in contours[i])]
         if len(pts) < 2:
             continue
         pts.append(pts[0])  # close the contour
-        strokes.extend(boundary.clip_stroke(pts))
+        strokes.extend(st for st in boundary.clip_stroke(pts) if stroke_length(st) >= MIN_STROKE_MM)
     return strokes
+
+
+def order_strokes(strokes, start):
+    """
+    Nearest-next drawing order: after each stroke, go to the closest
+    remaining one. Open strokes may be drawn backwards; closed loops start
+    at their point nearest the pen. Cuts pen-up travel dramatically compared
+    to the order the tracer finds shapes in.
+    """
+    if len(strokes) < 2:
+        return list(strokes)
+    closed = [math.dist(st[0], st[-1]) < 0.5 for st in strokes]
+    pts, owner, vertex = [], [], []
+    for i, st in enumerate(strokes):
+        # Loops: ~24 candidate entry points; open strokes: either end.
+        verts = range(0, len(st) - 1, max(1, (len(st) - 1) // 24)) if closed[i] else (0, len(st) - 1)
+        for v in verts:
+            pts.append(st[v]); owner.append(i); vertex.append(v)
+    P, owner, vertex = np.array(pts, float), np.array(owner), np.array(vertex)
+    alive = np.ones(len(P), bool)
+    pos = np.array(start, float)
+    ordered = []
+    for _ in range(len(strokes)):
+        d = np.where(alive, ((P - pos) ** 2).sum(axis=1), np.inf)
+        k = int(np.argmin(d))
+        i, v = int(owner[k]), int(vertex[k])
+        st = strokes[i]
+        if closed[i]:
+            loop = st[:-1]
+            st = loop[v:] + loop[:v] + [loop[v]]
+        elif v != 0:
+            st = st[::-1]
+        ordered.append(st)
+        pos = np.array(st[-1], float)
+        alive[owner == i] = False
+    return ordered
+
+
+# Seconds per G-code move, measured on the arm (text jobs ≈ 0.2 s/move).
+SECONDS_PER_MOVE = 0.25
+MAX_DRAW_MINUTES = 90  # refuse drawings that would take longer than this
+
+
+def estimate_minutes(moves):
+    return round(moves * SECONDS_PER_MOVE / 60, 1)
 
 
 def strokes_to_gcode(strokes, pen_up_height=DEFAULT_PEN_UP_HEIGHT):
@@ -733,7 +842,7 @@ def strokes_to_gcode(strokes, pen_up_height=DEFAULT_PEN_UP_HEIGHT):
         commands.append(f"G0 X{to[0]} Y{to[1]} Z{z_up}")
 
     commands.append(f"G0 X{last[0]} Y{last[1]} Z{z_up}")
-    for stroke in strokes:
+    for stroke in order_strokes(strokes, last):
         travel(stroke[0])
         for x, y in stroke:
             commands.append(f"G0 X{x} Y{y} Z{z_axis}")
@@ -757,6 +866,23 @@ def preflight(gcode):
             return reason
         pos = target
     return None
+
+
+def strokes_json(strokes, contours, size):
+    """
+    Preview data for the app, which draws it itself so it can drag/rotate
+    instantly: "strokes" = what will be drawn (clipped, arm mm); "full" =
+    the whole unclipped outline, shown faintly so clipped parts are visible.
+    """
+    full = [[list(px_to_mm(float(x), float(y), size)) for x, y in (pt[0] for pt in c)] for c in contours]
+    try:
+        moves = len(strokes_to_gcode(strokes, 5))
+    except ValueError:
+        moves = None
+    return {"strokes": [[list(p) for p in st] for st in strokes], "full": full,
+            "stroke_count": len(strokes), "moves": moves,
+            "minutes": estimate_minutes(moves) if moves else None,
+            "max_minutes": MAX_DRAW_MINUTES}
 
 
 def render_pit_preview(strokes=None, contours=None, canvas=None):
@@ -880,12 +1006,25 @@ def preview_image():
     sharpen = int(request.form.get("sharpen", DEFAULT_SHARPEN))
 
     try:
-        contours, canvas_size = process_image_to_contours(
-            image_bytes, threshold, gauss, sharpen
+        contours, canvas_size = image_to_contours(
+            image_bytes, threshold, gauss, sharpen, layout_from(request.form)
         )
         strokes = contours_to_strokes(contours, canvas_size)
+        if request.form.get("format") == "json":
+            return jsonify(strokes_json(strokes, contours, canvas_size))
         preview = render_pit_preview(strokes, contours, canvas_size)
         return send_file(io.BytesIO(preview), mimetype="image/png")
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/auto-settings", methods=["POST"])
+def auto_settings():
+    """Best threshold/blur/sharpen for an uploaded picture (multipart 'image')."""
+    if "image" not in request.files:
+        return jsonify({"error": "No image provided"}), 400
+    try:
+        return jsonify(auto_image_settings(request.files["image"].read()))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -938,21 +1077,25 @@ def draw():
             label = text
             source = "text"
 
-            contours, canvas_size = text_to_contours(
-                text, font_name, font_size, text_center(data), data.get("curve", 0), data.get("rotation", 0))
+            contours, canvas_size = text_to_contours(text, font_name, font_size, layout_from(data))
         else:
             return jsonify({"error": "Invalid content type"}), 400
 
         if source == "image":
-            contours, canvas_size = process_image_to_contours(
-                image_bytes, threshold, gauss, sharpen
+            contours, canvas_size = image_to_contours(
+                image_bytes, threshold, gauss, sharpen, layout_from(request.form)
             )
 
         # Convert contours → clipped strokes → G-code
-        strokes = contours_to_strokes(contours, canvas_size, skip_frame=(source == "image"))
+        strokes = contours_to_strokes(contours, canvas_size)
         if not strokes:
             return jsonify({"error": "Nothing to draw inside the pit — try adjusting threshold"}), 400
         gcode = strokes_to_gcode(strokes, pen_up_height)
+        minutes = estimate_minutes(len(gcode))
+        if minutes > MAX_DRAW_MINUTES:
+            return jsonify({"error": f"Too detailed: {len(strokes)} strokes, about {minutes:.0f} min to draw "
+                                     f"(limit {MAX_DRAW_MINUTES}). Try a lower threshold, more blur, "
+                                     f"or a simpler picture."}), 400
 
         reason = preflight(gcode)
         if reason:
@@ -1174,6 +1317,7 @@ def set_z_height():
     if reason:
         return jsonify({"success": False, "error": reason, "z_height": HOME_POSITION[2]}), 400
     HOME_POSITION[2] = new_z
+    boundary.surface_z = new_z
     cfg = load_robot_config()
     cfg["draw_z"] = new_z
     save_robot_config(cfg)
@@ -1214,9 +1358,9 @@ def set_boundary():
 @app.route("/boundary/settings", methods=["POST"])
 @refuse_while_busy
 def set_boundary_settings():
-    """{"safe_z": float, "margin_mm": float} — either may be omitted."""
+    """{"rim_clearance_mm", "margin_mm", "safe_z"} — any may be omitted."""
     data = request.get_json() or {}
-    boundary.update_settings(data.get("safe_z"), data.get("margin_mm"))
+    boundary.update_settings(data.get("safe_z"), data.get("margin_mm"), data.get("rim_clearance_mm"))
     return get_boundary()
 
 
@@ -1236,14 +1380,10 @@ def preview_text():
         return jsonify({"error": "No text provided"}), 400
     try:
         contours, size = text_to_contours(text, data.get("font_name"), data.get("font_size", 80),
-                                          text_center(data), data.get("curve", 0), data.get("rotation", 0))
-        strokes = contours_to_strokes(contours, size, skip_frame=False)
+                                          layout_from(data))
+        strokes = contours_to_strokes(contours, size)
         if data.get("format") == "json":
-            # The app draws these itself so it can drag them around instantly.
-            # "strokes" = what will be drawn (clipped, mm); "full" = the whole
-            # unclipped outline, shown faintly so clipped parts are visible.
-            full = [[list(px_to_mm(float(x), float(y), size)) for x, y in (pt[0] for pt in c)] for c in contours]
-            return jsonify({"strokes": [[list(p) for p in st] for st in strokes], "full": full})
+            return jsonify(strokes_json(strokes, contours, size))
         return send_file(io.BytesIO(render_pit_preview(strokes, contours, size)), mimetype="image/png")
     except Exception as e:
         return jsonify({"error": str(e)}), 500

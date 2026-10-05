@@ -52,7 +52,7 @@ struct PitCalibrationView: View {
     @State private var busy = false
     @State private var message = ""
     @State private var isError = false
-    @State private var safeZ: Double = 200
+    @State private var rimClearance: Double = 15
 
     var body: some View {
         ZStack {
@@ -94,7 +94,7 @@ struct PitCalibrationView: View {
         .navigationBarTitleDisplayMode(.inline)
         .task {
             await store.refresh()
-            safeZ = store.boundary.safeZ
+            rimClearance = store.boundary.rimClearanceMm ?? 15
             position = try? await CalibrationAPI.call("/position", method: "GET")
         }
     }
@@ -261,22 +261,22 @@ struct PitCalibrationView: View {
 
     private var safetySettings: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("SAFE HEIGHT")
+            Text("RIM CLEARANCE")
                 .font(.sandCaption)
                 .foregroundColor(.sandTextSecondary)
-            Text("Below this Z the pen must stay inside the pit. Set it a bit above the rim.")
+            Text("To cross the rim (e.g. over the notch) the pen lifts this far above the drawing surface. Below that it must stay inside the pit. Set it a little higher than the rim stands above the sand.")
                 .font(.sandCaption)
                 .foregroundColor(.sandTextSecondary)
-            Stepper(value: $safeZ, in: 80...220, step: 5) {
-                Text(String(format: "Z %.0f", safeZ))
+            Stepper(value: $rimClearance, in: 5...100, step: 5) {
+                Text(String(format: "%.0f mm above the surface  (Z %.0f)", rimClearance, store.boundary.safeZ))
                     .font(.sandBody)
                     .foregroundColor(.sandGold)
             }
-            if safeZ != store.boundary.safeZ {
-                secondaryButton("Save Safe Height", icon: "checkmark") {
-                    let b: PitBoundary = try await CalibrationAPI.call("/boundary/settings", body: ["safe_z": safeZ])
+            if rimClearance != (store.boundary.rimClearanceMm ?? 15) {
+                secondaryButton("Save Rim Clearance", icon: "checkmark") {
+                    let b: PitBoundary = try await CalibrationAPI.call("/boundary/settings", body: ["rim_clearance_mm": rimClearance])
                     store.update(b)
-                    message = "Safe height set to Z \(Int(safeZ))"
+                    message = "Rim clearance set to \(Int(rimClearance)) mm"
                 }
             }
             HStack {

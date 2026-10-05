@@ -156,7 +156,7 @@ struct SettingsView: View {
                                     Text("Boundary")
                                         .font(.sandBody)
                                         .foregroundColor(.sandTextPrimary)
-                                    Text(pitStore.boundary.calibrated ? "Calibrated · safe Z \(Int(pitStore.boundary.safeZ))" : "Estimated — tap to calibrate")
+                                    Text(pitStore.boundary.calibrated ? "Calibrated · rim clearance \(Int(pitStore.boundary.rimClearanceMm ?? 15)) mm" : "Estimated — tap to calibrate")
                                         .font(.sandCaption)
                                         .foregroundColor(pitStore.boundary.calibrated ? .sandTextSecondary : .sandOrange)
                                 }

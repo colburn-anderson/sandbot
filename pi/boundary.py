@@ -34,7 +34,8 @@ DEFAULT_POLYGON = (
 
 DEFAULT_CONFIG = {
     "polygon": DEFAULT_POLYGON,
-    "safe_z": 200.0,       # at/above this Z the pen clears the rim
+    "safe_z": 200.0,       # fallback only: used until the drawing surface Z is known
+    "rim_clearance_mm": 15.0,  # crossing the rim: this far above the drawing surface
     "margin_mm": 8.0,      # keep this far inside the rim
     "calibrated": False,
 }
@@ -111,6 +112,7 @@ class Boundary:
         self.lock = threading.Lock()
         self.config = dict(DEFAULT_CONFIG)
         self._mask = None
+        self.surface_z = None  # pen-down Z of the drawing surface, set by the bridge
         self.load()
 
     # ── persistence ────────────────────────────────────────────────
@@ -150,10 +152,12 @@ class Boundary:
             self.config["calibrated"] = calibrated
             self.save()
 
-    def update_settings(self, safe_z=None, margin_mm=None):
+    def update_settings(self, safe_z=None, margin_mm=None, rim_clearance_mm=None):
         with self.lock:
             if safe_z is not None:
                 self.config["safe_z"] = float(safe_z)
+            if rim_clearance_mm is not None:
+                self.config["rim_clearance_mm"] = max(3.0, float(rim_clearance_mm))
             if margin_mm is not None:
                 self.config["margin_mm"] = float(margin_mm)
             self.save()
@@ -170,7 +174,13 @@ class Boundary:
 
     @property
     def safe_z(self):
-        return self.config["safe_z"]
+        """
+        Z at/above which the pen clears the rim: the drawing surface plus the
+        rim clearance, so it follows the pen height (paper, notebook, sand).
+        """
+        if self.surface_z is None:
+            return self.config["safe_z"]
+        return round(self.surface_z + self.config.get("rim_clearance_mm", 15.0), 1)
 
     @property
     def margin(self):
@@ -184,6 +194,8 @@ class Boundary:
     def to_dict(self):
         min_x, min_y, max_x, max_y = self.bbox()
         d = dict(self.config)
+        d["safe_z"] = self.safe_z
+        d.setdefault("rim_clearance_mm", 15.0)
         d["bbox"] = {"min_x": min_x, "min_y": min_y, "max_x": max_x, "max_y": max_y}
         return d
 

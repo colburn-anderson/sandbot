@@ -14,7 +14,8 @@ struct SendSheet: View {
     let inputText: String
     let fontSize: Int
     let selectedFont: String
-    var textLayout = TextLayout()
+    var textLayout = DrawingLayout()
+    var imageLayout = DrawingLayout()
     let selectedImage: UIImage?
     let threshold: Int
     let gauss: Int
@@ -153,6 +154,7 @@ struct SendSheet: View {
                     sharpen: sharpen,
                     penUpHeight: penUpHeight,
                     label: label,
+                    layout: imageLayout,
                     context: modelContext
                 )
             case .text:

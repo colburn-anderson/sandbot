@@ -15,9 +15,10 @@ let USE_MOCK_ROBOT = false
 
 protocol RobotServiceProtocol {
     func fetchStatus() async throws -> RobotStatusResponse
-    func sendImage(_ image: UIImage, threshold: Int, gauss: Int, sharpen: Int, penUpHeight: Int, label: String) async throws -> String
-    func sendText(_ text: String, fontSize: Int, fontName: String, threshold: Int, gauss: Int, sharpen: Int, penUpHeight: Int, layout: TextLayout) async throws -> String
-    func fetchPreview(_ image: UIImage, threshold: Int, gauss: Int, sharpen: Int) async throws -> UIImage
+    func sendImage(_ image: UIImage, threshold: Int, gauss: Int, sharpen: Int, penUpHeight: Int, label: String, layout: DrawingLayout) async throws -> String
+    func sendText(_ text: String, fontSize: Int, fontName: String, threshold: Int, gauss: Int, sharpen: Int, penUpHeight: Int, layout: DrawingLayout) async throws -> String
+    func fetchImagePreview(_ image: UIImage, threshold: Int, gauss: Int, sharpen: Int, layout: DrawingLayout) async throws -> PreviewStrokes
+    func fetchAutoSettings(_ image: UIImage) async throws -> ImageSettings
     func fetchJobStatus(jobId: String) async throws -> JobStatus
     func connectArm() async throws
     func loadMotors() async throws
@@ -25,7 +26,7 @@ protocol RobotServiceProtocol {
     func stopArm() async throws
     func sendMoveCommand(position: String) async throws
     func fetchBoundary() async throws -> PitBoundary
-    func fetchTextPreview(_ text: String, fontSize: Int, fontName: String, layout: TextLayout) async throws -> TextPreviewStrokes
+    func fetchTextPreview(_ text: String, fontSize: Int, fontName: String, layout: DrawingLayout) async throws -> PreviewStrokes
     func fetchJobPhoto(jobId: String) async throws -> Data?
 }
 
@@ -57,7 +58,7 @@ final class LiveRobotService: RobotServiceProtocol {
 
     // MARK: Send image for drawing
 
-    func sendImage(_ image: UIImage, threshold: Int, gauss: Int, sharpen: Int, penUpHeight: Int, label: String) async throws -> String {
+    func sendImage(_ image: UIImage, threshold: Int, gauss: Int, sharpen: Int, penUpHeight: Int, label: String, layout: DrawingLayout) async throws -> String {
         let url = URL(string: "\(baseURL)/draw")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -69,10 +70,8 @@ final class LiveRobotService: RobotServiceProtocol {
         var body = Data()
 
         // Image file
-        guard let imageData = image.jpegData(compressionQuality: 0.9) else {
-            throw RobotError.invalidImage
-        }
-        body.appendMultipart(name: "image", filename: "drawing.jpg", mimeType: "image/jpeg", data: imageData, boundary: boundary)
+        body.appendMultipart(name: "image", filename: "drawing.jpg", mimeType: "image/jpeg",
+                             data: try Self.uploadJPEG(image), boundary: boundary)
 
         // Parameters
         body.appendMultipartField(name: "threshold", value: "\(threshold)", boundary: boundary)
@@ -80,6 +79,9 @@ final class LiveRobotService: RobotServiceProtocol {
         body.appendMultipartField(name: "sharpen", value: "\(sharpen)", boundary: boundary)
         body.appendMultipartField(name: "pen_up_height", value: "\(penUpHeight)", boundary: boundary)
         body.appendMultipartField(name: "label", value: label, boundary: boundary)
+        for (key, value) in layout.payload {
+            body.appendMultipartField(name: key, value: "\(value)", boundary: boundary)
+        }
 
         // Close boundary
         body.append("--\(boundary)--\r\n".data(using: .utf8)!)
@@ -98,7 +100,7 @@ final class LiveRobotService: RobotServiceProtocol {
 
     // MARK: Send text for drawing
 
-    func sendText(_ text: String, fontSize: Int, fontName: String, threshold: Int, gauss: Int, sharpen: Int, penUpHeight: Int, layout: TextLayout) async throws -> String {
+    func sendText(_ text: String, fontSize: Int, fontName: String, threshold: Int, gauss: Int, sharpen: Int, penUpHeight: Int, layout: DrawingLayout) async throws -> String {
         let url = URL(string: "\(baseURL)/draw")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -129,35 +131,67 @@ final class LiveRobotService: RobotServiceProtocol {
 
     // MARK: Preview contours (image only)
 
-    func fetchPreview(_ image: UIImage, threshold: Int, gauss: Int, sharpen: Int) async throws -> UIImage {
+    /// Exactly what the robot will draw for this image, as strokes in arm mm.
+    func fetchImagePreview(_ image: UIImage, threshold: Int, gauss: Int, sharpen: Int, layout: DrawingLayout) async throws -> PreviewStrokes {
         let url = URL(string: "\(baseURL)/preview")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = 15
+        request.timeoutInterval = 20
 
         let boundary = UUID().uuidString
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
         var body = Data()
-
-        guard let imageData = image.jpegData(compressionQuality: 0.9) else {
-            throw RobotError.invalidImage
-        }
-        body.appendMultipart(name: "image", filename: "preview.jpg", mimeType: "image/jpeg", data: imageData, boundary: boundary)
+        body.appendMultipart(name: "image", filename: "preview.jpg", mimeType: "image/jpeg",
+                             data: try Self.uploadJPEG(image), boundary: boundary)
         body.appendMultipartField(name: "threshold", value: "\(threshold)", boundary: boundary)
         body.appendMultipartField(name: "gauss", value: "\(gauss)", boundary: boundary)
         body.appendMultipartField(name: "sharpen", value: "\(sharpen)", boundary: boundary)
+        body.appendMultipartField(name: "format", value: "json", boundary: boundary)
+        for (key, value) in layout.payload {
+            body.appendMultipartField(name: key, value: "\(value)", boundary: boundary)
+        }
         body.append("--\(boundary)--\r\n".data(using: .utf8)!)
-
         request.httpBody = body
 
         let (data, _) = try await URLSession.shared.data(for: request)
+        return try JSONDecoder().decode(PreviewStrokes.self, from: data)
+    }
 
-        guard let resultImage = UIImage(data: data) else {
-            throw RobotError.invalidResponse
+    /// Threshold / blur / sharpen the Pi picked for this picture by scoring
+    /// candidate settings against the original lines.
+    func fetchAutoSettings(_ image: UIImage) async throws -> ImageSettings {
+        var request = URLRequest(url: URL(string: "\(baseURL)/auto-settings")!)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        let boundary = UUID().uuidString
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        var body = Data()
+        body.appendMultipart(name: "image", filename: "auto.jpg", mimeType: "image/jpeg",
+                             data: try Self.uploadJPEG(image), boundary: boundary)
+        body.append("--\(boundary)--\r\n".data(using: .utf8)!)
+        request.httpBody = body
+        let (data, _) = try await URLSession.shared.data(for: request)
+        return try JSONDecoder().decode(ImageSettings.self, from: data)
+    }
+
+    /// JPEG for upload, downscaled so the longest side is at most 1600 px —
+    /// plenty for the Pi (it works at ~900 px) and much faster over Tailscale.
+    static func uploadJPEG(_ image: UIImage) throws -> Data {
+        let maxSide: CGFloat = 1600
+        let longest = max(image.size.width, image.size.height)
+        var upload = image
+        if longest > maxSide {
+            let factor = maxSide / longest
+            let size = CGSize(width: image.size.width * factor, height: image.size.height * factor)
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 1
+            upload = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+                image.draw(in: CGRect(origin: .zero, size: size))
+            }
         }
-
-        return resultImage
+        guard let data = upload.jpegData(compressionQuality: 0.9) else { throw RobotError.invalidImage }
+        return data
     }
 
     // MARK: Job status
@@ -216,7 +250,7 @@ extension LiveRobotService {
     }
 
     /// Exactly what the robot will draw for this text, as strokes in arm mm.
-    func fetchTextPreview(_ text: String, fontSize: Int, fontName: String, layout: TextLayout) async throws -> TextPreviewStrokes {
+    func fetchTextPreview(_ text: String, fontSize: Int, fontName: String, layout: DrawingLayout) async throws -> PreviewStrokes {
         var request = URLRequest(url: URL(string: "\(baseURL)/preview-text")!)
         request.httpMethod = "POST"
         request.timeoutInterval = 15
@@ -226,7 +260,7 @@ extension LiveRobotService {
         ].merging(layout.payload) { _, new in new }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, _) = try await URLSession.shared.data(for: request)
-        return try JSONDecoder().decode(TextPreviewStrokes.self, from: data)
+        return try JSONDecoder().decode(PreviewStrokes.self, from: data)
     }
 }
 
@@ -240,6 +274,15 @@ extension LiveRobotService {
 }
 
 // MARK: - Response models
+
+/// Image filter settings (the Threshold / Blur / Sharpen sliders).
+struct ImageSettings: Decodable, Equatable {
+    var threshold: Int
+    var gauss: Int
+    var sharpen: Int
+
+    static let defaults = ImageSettings(threshold: 151, gauss: 3, sharpen: 7)
+}
 
 struct DrawResponse: Codable {
     let accepted: Bool?

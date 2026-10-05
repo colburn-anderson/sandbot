@@ -20,11 +20,11 @@ struct ComposeView: View {
     @State private var inputText: String = ""
     @State private var fontSize: Double = 80
     @State private var selectedFont: String = "Helvetica-Bold"
-    @State private var textLayout = TextLayout()
+    @State private var textLayout = DrawingLayout()
 
     // Image state
     @State private var selectedImage: UIImage? = nil
-    @State private var previewImage: UIImage? = nil
+    @State private var imageLayout = DrawingLayout()
 
     // Shared processing params (matching Freenove GUI defaults)
     @State private var threshold: Double = 151
@@ -74,8 +74,8 @@ struct ComposeView: View {
                             TextDrawView(inputText: $inputText, fontSize: $fontSize, selectedFont: $selectedFont, layout: $textLayout)
                         case .image:
                             ImageDrawView(
-                                previewImage: $previewImage,
                                 selectedImage: $selectedImage,
+                                layout: $imageLayout,
                                 threshold: $threshold,
                                 gauss: $gauss,
                                 sharpen: $sharpen
@@ -108,11 +108,12 @@ struct ComposeView: View {
                     fontSize: Int(fontSize),
                     selectedFont: selectedFont,
                     textLayout: textLayout,
+                    imageLayout: imageLayout,
                     selectedImage: selectedImage,
                     threshold: Int(threshold),
                     gauss: Int(gauss),
                     sharpen: Int(sharpen),
-                    penUpHeight: 30,
+                    penUpHeight: 5,  // pen lift between strokes (mm)
                     sendManager: sendManager
                 )
                 .onDisappear { sendManager.reset() }

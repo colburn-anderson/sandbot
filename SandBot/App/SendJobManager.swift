@@ -30,7 +30,7 @@ final class SendJobManager: ObservableObject {
 
     // MARK: - Send Image
 
-    func sendImage(image: UIImage, threshold: Int, gauss: Int, sharpen: Int, penUpHeight: Int, label: String, context: ModelContext) async {
+    func sendImage(image: UIImage, threshold: Int, gauss: Int, sharpen: Int, penUpHeight: Int, label: String, layout: DrawingLayout = DrawingLayout(), context: ModelContext) async {
         sendState = .connecting
         try? await Task.sleep(nanoseconds: 300_000_000)
 
@@ -42,7 +42,8 @@ final class SendJobManager: ObservableObject {
                 gauss: gauss,
                 sharpen: sharpen,
                 penUpHeight: penUpHeight,
-                label: label
+                label: label,
+                layout: layout
             )
 
             sendState = .queued
@@ -57,7 +58,7 @@ final class SendJobManager: ObservableObject {
 
     // MARK: - Send Text
 
-    func sendText(text: String, fontSize: Int, fontName: String, threshold: Int, gauss: Int, sharpen: Int, penUpHeight: Int, layout: TextLayout = TextLayout(), context: ModelContext) async {
+    func sendText(text: String, fontSize: Int, fontName: String, threshold: Int, gauss: Int, sharpen: Int, penUpHeight: Int, layout: DrawingLayout = DrawingLayout(), context: ModelContext) async {
         sendState = .connecting
         try? await Task.sleep(nanoseconds: 300_000_000)
 
@@ -162,7 +163,7 @@ final class SendJobManager: ObservableObject {
         let started = Date()
         var lastContact = Date()
         let maxSilence: TimeInterval = 20 * 60   // unreachable this long → give up
-        let maxTotal: TimeInterval = 90 * 60     // big drawings can take a while
+        let maxTotal: TimeInterval = 4 * 60 * 60  // the robot allows drawings up to 90 min
 
         while Date().timeIntervalSince(started) < maxTotal,
               Date().timeIntervalSince(lastContact) < maxSilence {

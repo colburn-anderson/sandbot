@@ -13,12 +13,14 @@ import Combine
 struct PitBoundary: Codable, Equatable {
     var polygon: [[Double]]
     var safeZ: Double
+    var rimClearanceMm: Double? = nil
     var marginMm: Double
     var calibrated: Bool
 
     enum CodingKeys: String, CodingKey {
         case polygon
         case safeZ = "safe_z"
+        case rimClearanceMm = "rim_clearance_mm"
         case marginMm = "margin_mm"
         case calibrated
     }
@@ -134,14 +136,16 @@ struct PitBackdrop: View {
     }
 }
 
-/// Where and how text sits in the pit: centre in arm mm (nil = middle of the
-/// pit), curve (-1 dips ∪ around the notch … 0 straight … 1 arches ∩), and
-/// rotation in degrees, counter-clockwise as seen in the preview.
-struct TextLayout: Equatable {
+/// Where and how a drawing (text or image) sits in the pit: centre in arm
+/// mm (nil = middle of the pit), curve (-1 dips ∪ around the notch … 0
+/// straight … 1 arches ∩), rotation in degrees counter-clockwise as seen in
+/// the preview, and scale (images only; 1 = fits the pit).
+struct DrawingLayout: Equatable {
     var centerX: Double? = nil
     var centerY: Double? = nil
     var curve: Double = 0
     var rotation: Double = 0
+    var scale: Double = 1
 
     /// Keep rotation in -180…180.
     static func normalized(_ degrees: Double) -> Double {
@@ -151,9 +155,9 @@ struct TextLayout: Equatable {
         return d
     }
 
-    /// Fields for the bridge's text requests (/draw, /preview-text).
+    /// Fields for the bridge's /draw and preview requests.
     var payload: [String: Any] {
-        var p: [String: Any] = ["curve": curve, "rotation": rotation]
+        var p: [String: Any] = ["curve": curve, "rotation": rotation, "scale": scale]
         if let centerX, let centerY {
             p["center_x"] = centerX
             p["center_y"] = centerY
@@ -162,9 +166,23 @@ struct TextLayout: Equatable {
     }
 }
 
-/// Text preview from the bridge, in arm mm: what will be drawn (clipped to
-/// the pit) and the full unclipped outline (shown faintly).
-struct TextPreviewStrokes: Decodable {
+/// Preview from the bridge, in arm mm: what will be drawn (clipped to the
+/// pit) and the full unclipped outline (shown faintly).
+struct PreviewStrokes: Decodable {
     var strokes: [[[Double]]]
     var full: [[[Double]]]
+    var strokeCount: Int? = nil
+    var minutes: Double? = nil      // estimated drawing time
+    var maxMinutes: Double? = nil   // the robot refuses drawings longer than this
+
+    enum CodingKeys: String, CodingKey {
+        case strokes, full, minutes
+        case strokeCount = "stroke_count"
+        case maxMinutes = "max_minutes"
+    }
+
+    var isTooLong: Bool {
+        guard let minutes, let maxMinutes else { return false }
+        return minutes > maxMinutes
+    }
 }
