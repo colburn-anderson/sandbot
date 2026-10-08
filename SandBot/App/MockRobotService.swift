@@ -32,9 +32,9 @@ final class MockRobotService: RobotServiceProtocol {
         throw RobotError.invalidResponse  // falls back to the on-device preview
     }
 
-    func fetchJobStatus(jobId: String) async throws -> JobStatus {
+    func fetchJob(jobId: String) async throws -> JobReport {
         try await Task.sleep(nanoseconds: 500_000_000)
-        return .completed
+        return JobReport(status: .completed, error: nil)
     }
 
     func connectArm() async throws {

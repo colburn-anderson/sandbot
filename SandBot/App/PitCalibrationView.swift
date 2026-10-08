@@ -36,7 +36,8 @@ private enum CalibrationAPI {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
         }
-        let (data, _) = try await URLSession.shared.data(for: request)
+        // Resends after a Wi-Fi drop carry the same request ID, so a jog never moves twice.
+        let (data, _) = try await RobotLink.send(request)
         if let err = try? JSONDecoder().decode(ServerError.self, from: data) {
             throw RobotError.serverError(err.error)
         }

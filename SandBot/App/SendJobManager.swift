@@ -46,7 +46,6 @@ final class SendJobManager: ObservableObject {
                 layout: layout
             )
 
-            sendState = .queued
             let entry = saveHistory(label: label, source: "image", jobId: jobId, context: context)
 
             await pollUntilDone(jobId: jobId, entry: entry, context: context)
@@ -75,7 +74,6 @@ final class SendJobManager: ObservableObject {
                 layout: layout
             )
 
-            sendState = .queued
             let entry = saveHistory(label: text, source: "text", jobId: jobId, context: context)
 
             await pollUntilDone(jobId: jobId, entry: entry, context: context)
@@ -112,16 +110,18 @@ final class SendJobManager: ObservableObject {
         for entry in entries where entry.status == .sent || entry.status == .drawing {
             guard let jobId = entry.jobId, !jobId.isEmpty else { continue }
             do {
-                switch try await RobotService.shared.fetchJobStatus(jobId: jobId) {
+                switch try await RobotService.shared.fetchJob(jobId: jobId).status {
                 case .completed:
                     entry.status = .completed
                     if entry.completionPhotoData == nil {
                         entry.completionPhotoData = try? await RobotService.shared.fetchJobPhoto(jobId: jobId)
                     }
-                case .failed:
+                case .failed, .rejected:
                     entry.status = .failed
-                case .drawing, .sent:
+                case .drawing:
                     entry.status = .drawing
+                case .processing, .queued:
+                    break  // not drawing yet
                 }
             } catch RobotError.jobNotFound {
                 // Robot restarted since; the photo may still be on disk.
@@ -156,23 +156,37 @@ final class SendJobManager: ObservableObject {
     // MARK: - Polling (this is what actually drives the UI state now)
 
     private func pollUntilDone(jobId: String, entry: DrawingHistoryEntry, context: ModelContext) async {
-        // Give the bridge a moment to transition the job to "drawing"
-        try? await Task.sleep(nanoseconds: 1_000_000_000)
-        sendState = .drawing
-
         let started = Date()
         var lastContact = Date()
+        var drawingStarted = false
         let maxSilence: TimeInterval = 20 * 60   // unreachable this long → give up
         let maxTotal: TimeInterval = 4 * 60 * 60  // the robot allows drawings up to 90 min
 
         while Date().timeIntervalSince(started) < maxTotal,
               Date().timeIntervalSince(lastContact) < maxSilence {
-            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            // Every second while the Pi works out the moves, then every 5 s.
+            try? await Task.sleep(nanoseconds: drawingStarted ? 5_000_000_000 : 1_000_000_000)
             do {
-                let status = try await RobotService.shared.fetchJobStatus(jobId: jobId)
+                // Rides out Wi-Fi hops by itself, so an error here is a real outage.
+                let job = try await RobotService.shared.fetchJob(jobId: jobId)
                 lastContact = Date()
                 isReconnecting = false
-                switch status {
+                switch job.status {
+                case .processing, .queued:
+                    break  // still "Sending…"
+                case .rejected:
+                    // Never drawn (too detailed, nothing inside the pit, …): not History material.
+                    context.delete(entry)
+                    try? context.save()
+                    sendState = .failed(job.error ?? "The robot couldn't draw this.")
+                    return
+                case .drawing:
+                    if !drawingStarted {
+                        drawingStarted = true
+                        sendState = .queued  // "Drawing Started!"
+                        try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    }
+                    sendState = .drawing
                 case .completed:
                     entry.status = .completed
                     // The Pi parks at the camera view and photographs the result.
@@ -188,16 +202,13 @@ final class SendJobManager: ObservableObject {
                         : "The drawing failed partway through.")
                     isStopping = false
                     return
-                case .drawing, .sent:
-                    // Still going — keep the in-progress screen up
-                    sendState = .drawing
                 }
             } catch RobotError.jobNotFound {
                 isReconnecting = false
                 sendState = .failed("The robot restarted and lost track of this drawing. Check the pit.")
                 return
             } catch {
-                // Network hiccup — the Pi keeps drawing; keep trying.
+                // Out of reach for longer than a Wi-Fi hop. The Pi keeps drawing; keep trying.
                 isReconnecting = true
             }
         }

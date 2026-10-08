@@ -215,7 +215,7 @@ struct SettingsView: View {
     /// The Pi owns the pen height; show its value so the first tap is a 1 mm step.
     private func syncZFromRobot() async {
         guard let url = URL(string: "\(robotBaseURL)/z-height"),
-              let (data, _) = try? await URLSession.shared.data(from: url),
+              let (data, _) = try? await RobotLink.send(URLRequest(url: url, timeoutInterval: 5), patience: 15),
               let z = try? JSONDecoder().decode(ZResponse.self, from: data) else { return }
         drawingZHeight = z.z_height
     }
@@ -235,7 +235,7 @@ struct SettingsView: View {
                 request.timeoutInterval = 15  // first move may enable motors and home
                 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 request.httpBody = try JSONSerialization.data(withJSONObject: ["z_height": target])
-                let (data, _) = try await URLSession.shared.data(for: request)
+                let (data, _) = try await RobotLink.send(request)
                 let result = try JSONDecoder().decode(ZResponse.self, from: data)
                 drawingZHeight = result.z_height
                 if let error = result.error {

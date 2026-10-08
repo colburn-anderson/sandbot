@@ -13,6 +13,8 @@ The bridge:
   3. Sends the resulting G-code commands to the Freenove server via TCP
      using its flow-controlled protocol
   4. Returns job status to the iOS app via HTTP
+  5. Answers resent requests once (see RESENT REQUESTS) — the app resends
+     whatever got no answer while the Pi's Wi-Fi was hopping
 
 Run this ON THE PI alongside main.py:
   sudo python sandbot_bridge.py
@@ -26,8 +28,10 @@ import time
 import json
 import uuid
 import socket
+import functools
 import threading
 import traceback
+from collections import OrderedDict
 from datetime import datetime
 from flask import Flask, request, jsonify, send_file
 import cv2
@@ -132,8 +136,6 @@ current_job = {"id": None, "label": None}
 
 def refuse_while_busy(fn):
     """Decorator: 409 instead of moving the arm while a drawing is running."""
-    import functools
-
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         if robot_busy.locked():
@@ -145,6 +147,102 @@ def refuse_while_busy(fn):
                 "z_height": HOME_POSITION[2],
             }), 409
         return fn(*args, **kwargs)
+    return wrapper
+
+
+# ── RESENT REQUESTS ─────────────────────────────────────────────────
+# The Pi's Wi-Fi drops for a second or two each time it hops between the
+# router's two radios, so the app quietly resends any request that got no
+# answer. Requests that change something carry an X-Request-ID that stays the
+# same on every resend, and a repeat gets the first reply back instead of
+# running again: a drawing is never drawn twice, a jog never moves twice.
+# Drawing replies are also kept on disk in case the bridge restarts while the
+# app is still resending.
+RESENDS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recent_requests.json")
+MAX_REMEMBERED_REQUESTS = 100
+replies = OrderedDict()  # request id -> {"done": Event, "reply": (body, status) or None, "persist": bool}
+replies_lock = threading.Lock()
+
+
+def load_saved_replies():
+    try:
+        with open(RESENDS_FILE) as f:
+            saved = json.load(f)
+        for request_id, (body, status) in saved.items():
+            done = threading.Event()
+            done.set()
+            replies[request_id] = {"done": done, "reply": (body.encode(), int(status)), "persist": True}
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError, TypeError, AttributeError) as e:
+        print(f"[Bridge] Ignoring unreadable {RESENDS_FILE}: {e}")
+
+
+def save_replies():
+    try:
+        with replies_lock:
+            keep = {rid: [e["reply"][0].decode(), e["reply"][1]]
+                    for rid, e in replies.items() if e["persist"] and e["reply"]}
+            with open(RESENDS_FILE + ".tmp", "w") as f:
+                json.dump(keep, f)
+            os.replace(RESENDS_FILE + ".tmp", RESENDS_FILE)
+    except OSError as e:
+        print(f"[Bridge] Couldn't save recent requests: {e}")
+
+
+load_saved_replies()
+
+
+def idempotent(fn=None, *, persist=False):
+    """
+    Decorator: a request resent with the same X-Request-ID gets the first
+    reply instead of running again. Requests without an ID run as usual.
+    `persist` keeps the replies across bridge restarts.
+    """
+    if fn is None:
+        return functools.partial(idempotent, persist=persist)
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        request_id = request.headers.get("X-Request-ID")
+        if not request_id:
+            return fn(*args, **kwargs)
+        # Take in the whole request before claiming its ID, so a half-arrived
+        # copy from a dropped connection can't hold up the resend.
+        request.get_data(parse_form_data=True)
+        while True:
+            with replies_lock:
+                entry = replies.get(request_id)
+                first = entry is None
+                if first:
+                    entry = replies[request_id] = {"done": threading.Event(), "reply": None,
+                                                   "persist": persist}
+                    while len(replies) > MAX_REMEMBERED_REQUESTS:
+                        replies.popitem(last=False)
+            if first:
+                break
+            # Seen it before: wait for the first copy to finish, then give the same answer.
+            entry["done"].wait(timeout=60)
+            if entry["reply"] is not None:
+                print(f"[Bridge] Resent {request.path} ({request_id[:8]}): answered from the first copy")
+                body, status = entry["reply"]
+                return app.response_class(body, status=status, mimetype="application/json")
+            if not entry["done"].is_set():
+                return jsonify({"error": "The robot is still working on this request"}), 503
+            # The first copy crashed without an answer (and forgot its ID): run this one.
+
+        try:
+            response = app.make_response(fn(*args, **kwargs))
+        except Exception:
+            with replies_lock:
+                replies.pop(request_id, None)
+            entry["done"].set()
+            raise
+        entry["reply"] = (response.get_data(), response.status_code)
+        entry["done"].set()
+        if persist:
+            save_replies()
+        return response
     return wrapper
 
 
@@ -346,8 +444,7 @@ class FreenoveClient:
         queue = list(gcode_commands)
         total = len(queue)
         sent = 0
-        self.violation = None
-        self.abort = False
+        self.violation = None  # (abort is reset when the job starts, so an early Stop counts)
         print(f"[Bridge] Sending {total} G-code commands with flow control...")
 
         # Start query mode
@@ -928,6 +1025,7 @@ def get_status():
 
 
 @app.route("/connect", methods=["POST"])
+@idempotent
 def connect_arm():
     """Connect to the Freenove server."""
     if freenove.connected:
@@ -940,6 +1038,7 @@ def connect_arm():
 
 
 @app.route("/load", methods=["POST"])
+@idempotent
 @refuse_while_busy
 def load_motors():
     """Enable motors."""
@@ -950,6 +1049,7 @@ def load_motors():
 
 
 @app.route("/relax", methods=["POST"])
+@idempotent
 @refuse_while_busy
 def relax_motors():
     """Disable/relax motors."""
@@ -960,6 +1060,7 @@ def relax_motors():
 
 
 @app.route("/stop", methods=["POST"])
+@idempotent
 def stop_arm():
     """
     Graceful stop: stop sending moves, let the few already queued on the arm
@@ -981,6 +1082,7 @@ def stop_arm():
 
 
 @app.route("/emergency-stop", methods=["POST"])
+@idempotent
 def emergency_stop():
     """
     Last resort: Freenove's S13 cuts motor power instantly (the arm drops)
@@ -1030,165 +1132,219 @@ def auto_settings():
 
 
 @app.route("/draw", methods=["POST"])
+@idempotent(persist=True)
 def draw():
     """
     Process an image or text and send drawing commands to the arm.
-    
+
     For images: multipart form with 'image' file + optional params
     For text: JSON body with 'text', optional 'font_name', 'font_size'
-    
+
     Both go through the same contour → G-code pipeline.
+
+    With an X-Request-ID (current app) the reply comes as soon as the request
+    has arrived (202); the app then follows /job/<id>: "processing" while the
+    moves are worked out, "rejected" (with the reason) if it can't be drawn,
+    else "drawing". Without one (older builds) the reply comes after
+    processing, with any rejection as a 400, like before.
     """
     if not freenove.connected:
         return jsonify({"error": "Not connected to arm"}), 400
 
-    job_id = str(uuid.uuid4())[:8]
-    source = "image"
-    label = "Drawing"
-
     try:
-        # Determine input type
-        if request.content_type and "multipart" in request.content_type:
-            # Image upload
-            if "image" not in request.files:
-                return jsonify({"error": "No image provided"}), 400
-
-            image_bytes = request.files["image"].read()
-            threshold = int(request.form.get("threshold", DEFAULT_THRESHOLD))
-            gauss = int(request.form.get("gauss", DEFAULT_GAUSS))
-            sharpen = int(request.form.get("sharpen", DEFAULT_SHARPEN))
-            pen_up_height = int(request.form.get("pen_up_height", DEFAULT_PEN_UP_HEIGHT))
-            label = request.form.get("label", "Image Drawing")
-            source = "image"
-
-        elif request.is_json:
-            # Text input
-            data = request.get_json()
-            text = data.get("text", "")
-            if not text:
-                return jsonify({"error": "No text provided"}), 400
-
-            font_name = data.get("font_name", None)
-            font_size = data.get("font_size", 80)
-            threshold = data.get("threshold", DEFAULT_THRESHOLD)
-            gauss = data.get("gauss", DEFAULT_GAUSS)
-            sharpen = data.get("sharpen", DEFAULT_SHARPEN)
-            pen_up_height = data.get("pen_up_height", DEFAULT_PEN_UP_HEIGHT)
-            label = text
-            source = "text"
-
-            contours, canvas_size = text_to_contours(text, font_name, font_size, layout_from(data))
-        else:
-            return jsonify({"error": "Invalid content type"}), 400
-
-        if source == "image":
-            contours, canvas_size = image_to_contours(
-                image_bytes, threshold, gauss, sharpen, layout_from(request.form)
-            )
-
-        # Convert contours → clipped strokes → G-code
-        strokes = contours_to_strokes(contours, canvas_size)
-        if not strokes:
-            return jsonify({"error": "Nothing to draw inside the pit — try adjusting threshold"}), 400
-        gcode = strokes_to_gcode(strokes, pen_up_height)
-        minutes = estimate_minutes(len(gcode))
-        if minutes > MAX_DRAW_MINUTES:
-            return jsonify({"error": f"Too detailed: {len(strokes)} strokes, about {minutes:.0f} min to draw "
-                                     f"(limit {MAX_DRAW_MINUTES}). Try a lower threshold, more blur, "
-                                     f"or a simpler picture."}), 400
-
-        reason = preflight(gcode)
-        if reason:
-            return jsonify({"error": f"Blocked by pit boundary: {reason}"}), 400
+        spec = read_draw_request()
+        quick_ack = bool(request.headers.get("X-Request-ID"))
+        gcode = None if quick_ack else plan_drawing(spec)
 
         # One drawing at a time
-        if not robot_busy.acquire(blocking=False):
+        job_id = start_job(spec, gcode)
+        if job_id is None:
             return jsonify({
                 "error": f"Robot is busy drawing \"{current_job['label']}\" — wait for it to finish.",
                 "busy": True,
                 "job_id": current_job["id"],
             }), 409
-        current_job.update(id=job_id, label=label)
-
-        # Track the job
-        with jobs_lock:
-            jobs[job_id] = {
-                "status": "queued",
-                "created_at": datetime.now().isoformat(),
-                "label": label,
-                "source": source,
-                "gcode_count": len(gcode),
-            }
-
-        # Send G-code in background thread
-        def execute_drawing():
-            try:
-                run_job()
-            except Exception:
-                traceback.print_exc()
-                with jobs_lock:
-                    jobs[job_id]["status"] = "failed"
-                    jobs[job_id]["error"] = "Bridge error during drawing — check the log"
-                status_error()
-            finally:
-                current_job.update(id=None, label=None)
-                robot_busy.release()
-
-        def run_job():
-            with jobs_lock:
-                jobs[job_id]["status"] = "drawing"
-            status_drawing()
-            freenove.homed = False  # re-home every job to correct drift
-            freenove.ensure_ready()
-
-            success = freenove.send_gcode_batch(gcode)
-            stopped = freenove.abort
-            if stopped:
-                success = False
-
-            # Photograph the result from the camera view, then tuck up and unload.
-            # A stopped job skips the photo and goes straight to resting.
-            photo = None
-            if not stopped:
-                park_at_view()
-                photo = take_photo(job_id) if success else None
-            freenove.rest()
-
-            with jobs_lock:
-                jobs[job_id]["photo"] = bool(photo)
-                jobs[job_id]["status"] = "completed" if success else "failed"
-                if stopped:
-                    jobs[job_id]["error"] = "Stopped"
-                elif freenove.violation:
-                    jobs[job_id]["error"] = f"Blocked by pit boundary: {freenove.violation}"
-            if success:
-                status_complete()
-                def _to_idle():
-                    time.sleep(5)
-                    status_idle()
-                threading.Thread(target=_to_idle, daemon=True).start()
-            elif stopped:
-                status_idle()  # a deliberate stop isn't an error
-            else:
-                status_error()
-
-        try:
-            status_receiving()
-            threading.Thread(target=execute_drawing, daemon=True).start()
-        except Exception:
-            current_job.update(id=None, label=None)
-            robot_busy.release()  # never leave the robot stuck "busy"
-            raise
-
+        if quick_ack:
+            return jsonify({"accepted": True, "job_id": job_id, "status": "processing"}), 202
         return jsonify({
             "accepted": True,
             "job_id": job_id,
             "gcode_count": len(gcode),
         })
 
+    except Rejected as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+
+class Rejected(Exception):
+    """A drawing the bridge won't do: bad request, nothing in the pit, too long, off limits."""
+
+
+def read_draw_request():
+    """The /draw request's settings and picture or text (no processing yet)."""
+    if request.content_type and "multipart" in request.content_type:
+        # Image upload
+        if "image" not in request.files:
+            raise Rejected("No image provided")
+        return {
+            "source": "image",
+            "label": request.form.get("label", "Image Drawing"),
+            "image_bytes": request.files["image"].read(),
+            "threshold": int(request.form.get("threshold", DEFAULT_THRESHOLD)),
+            "gauss": int(request.form.get("gauss", DEFAULT_GAUSS)),
+            "sharpen": int(request.form.get("sharpen", DEFAULT_SHARPEN)),
+            "pen_up_height": int(request.form.get("pen_up_height", DEFAULT_PEN_UP_HEIGHT)),
+            "layout": layout_from(request.form),
+        }
+    if request.is_json:
+        # Text input
+        data = request.get_json()
+        text = data.get("text", "")
+        if not text:
+            raise Rejected("No text provided")
+        return {
+            "source": "text",
+            "label": text,
+            "text": text,
+            "font_name": data.get("font_name", None),
+            "font_size": data.get("font_size", 80),
+            "pen_up_height": data.get("pen_up_height", DEFAULT_PEN_UP_HEIGHT),
+            "layout": layout_from(data),
+        }
+    raise Rejected("Invalid content type")
+
+
+def plan_drawing(spec):
+    """Picture or text → G-code checked against the pit. Raises Rejected if it can't be drawn."""
+    if spec["source"] == "image":
+        contours, size = image_to_contours(
+            spec["image_bytes"], spec["threshold"], spec["gauss"], spec["sharpen"], spec["layout"]
+        )
+    else:
+        contours, size = text_to_contours(spec["text"], spec["font_name"], spec["font_size"],
+                                          spec["layout"])
+
+    # Convert contours → clipped strokes → G-code
+    strokes = contours_to_strokes(contours, size)
+    if not strokes:
+        raise Rejected("Nothing to draw inside the pit — try adjusting threshold")
+    gcode = strokes_to_gcode(strokes, spec["pen_up_height"])
+    minutes = estimate_minutes(len(gcode))
+    if minutes > MAX_DRAW_MINUTES:
+        raise Rejected(f"Too detailed: {len(strokes)} strokes, about {minutes:.0f} min to draw "
+                       f"(limit {MAX_DRAW_MINUTES}). Try a lower threshold, more blur, "
+                       f"or a simpler picture.")
+
+    reason = preflight(gcode)
+    if reason:
+        raise Rejected(f"Blocked by pit boundary: {reason}")
+    return gcode
+
+
+def start_job(spec, gcode=None):
+    """
+    Reserve the robot and run the job in a background thread; returns the
+    job id, or None if the robot is busy. Without G-code the job works it
+    out first, holding the robot so nothing else can start meanwhile.
+    """
+    if not robot_busy.acquire(blocking=False):
+        return None
+    job_id = str(uuid.uuid4())[:8]
+    current_job.update(id=job_id, label=spec["label"])
+    freenove.abort = False  # a Stop from now on ends this job, even before the arm moves
+
+    # Track the job
+    with jobs_lock:
+        jobs[job_id] = {
+            "status": "processing" if gcode is None else "queued",
+            "created_at": datetime.now().isoformat(),
+            "label": spec["label"],
+            "source": spec["source"],
+            "gcode_count": 0 if gcode is None else len(gcode),
+        }
+
+    try:
+        if gcode is not None:
+            status_receiving()
+        threading.Thread(target=execute_job, args=(job_id, spec, gcode), daemon=True).start()
+    except Exception:
+        current_job.update(id=None, label=None)
+        robot_busy.release()  # never leave the robot stuck "busy"
+        raise
+    return job_id
+
+
+def execute_job(job_id, spec, gcode):
+    try:
+        if gcode is None:
+            try:
+                gcode = plan_drawing(spec)
+            except Exception as e:
+                if not isinstance(e, Rejected):
+                    traceback.print_exc()
+                print(f"[Bridge] Job {job_id} rejected: {e}")
+                with jobs_lock:
+                    jobs[job_id].update(status="rejected", error=str(e))
+                return
+            with jobs_lock:
+                jobs[job_id]["gcode_count"] = len(gcode)
+            if freenove.abort:  # stopped before the arm moved
+                with jobs_lock:
+                    jobs[job_id].update(status="failed", error="Stopped")
+                return
+            status_receiving()
+        run_job(job_id, gcode)
+    except Exception:
+        traceback.print_exc()
+        with jobs_lock:
+            jobs[job_id]["status"] = "failed"
+            jobs[job_id]["error"] = "Bridge error during drawing — check the log"
+        status_error()
+    finally:
+        current_job.update(id=None, label=None)
+        robot_busy.release()
+
+
+def run_job(job_id, gcode):
+    with jobs_lock:
+        jobs[job_id]["status"] = "drawing"
+    status_drawing()
+    freenove.homed = False  # re-home every job to correct drift
+    freenove.ensure_ready()
+
+    success = freenove.send_gcode_batch(gcode)
+    stopped = freenove.abort
+    if stopped:
+        success = False
+
+    # Photograph the result from the camera view, then tuck up and unload.
+    # A stopped job skips the photo and goes straight to resting.
+    photo = None
+    if not stopped:
+        park_at_view()
+        photo = take_photo(job_id) if success else None
+    freenove.rest()
+
+    with jobs_lock:
+        jobs[job_id]["photo"] = bool(photo)
+        jobs[job_id]["status"] = "completed" if success else "failed"
+        if stopped:
+            jobs[job_id]["error"] = "Stopped"
+        elif freenove.violation:
+            jobs[job_id]["error"] = f"Blocked by pit boundary: {freenove.violation}"
+    if success:
+        status_complete()
+        def _to_idle():
+            time.sleep(5)
+            status_idle()
+        threading.Thread(target=_to_idle, daemon=True).start()
+    elif stopped:
+        status_idle()  # a deliberate stop isn't an error
+    else:
+        status_error()
 
 
 def park_at_view():
@@ -1244,6 +1400,7 @@ def get_view_position():
 
 
 @app.route("/view-position", methods=["POST"])
+@idempotent
 def set_view_position():
     """Save the pen's current position as the camera view / rest position."""
     if freenove.pos is None:
@@ -1256,7 +1413,10 @@ def set_view_position():
 
 @app.route("/job/<job_id>", methods=["GET"])
 def get_job_status(job_id):
-    """Get the status of a drawing job."""
+    """
+    Get the status of a drawing job: processing → drawing → completed or
+    failed, or processing → rejected (with the reason in "error").
+    """
     with jobs_lock:
         job = jobs.get(job_id)
     if not job:
@@ -1273,6 +1433,7 @@ def get_job_status(job_id):
 
 
 @app.route("/move", methods=["POST"])
+@idempotent
 @refuse_while_busy
 def move():
     """Move the arm to a specific position."""
@@ -1294,6 +1455,7 @@ def move():
 
 
 @app.route("/home", methods=["POST"])
+@idempotent
 @refuse_while_busy
 def go_home():
     """Send arm to home position."""
@@ -1308,6 +1470,7 @@ def get_z_height():
 
 
 @app.route("/set-z", methods=["POST"])
+@idempotent
 @refuse_while_busy
 def set_z_height():
     """Set the pen-down height, move the pen there at home, and save it."""
@@ -1344,6 +1507,7 @@ def get_boundary():
 
 
 @app.route("/boundary", methods=["POST"])
+@idempotent
 @refuse_while_busy
 def set_boundary():
     """Replace the outline: {"polygon": [[x, y], ...], "smooth": bool}."""
@@ -1356,6 +1520,7 @@ def set_boundary():
 
 
 @app.route("/boundary/settings", methods=["POST"])
+@idempotent
 @refuse_while_busy
 def set_boundary_settings():
     """{"rim_clearance_mm", "margin_mm", "safe_z"} — any may be omitted."""
@@ -1365,6 +1530,7 @@ def set_boundary_settings():
 
 
 @app.route("/boundary/reset", methods=["POST"])
+@idempotent
 @refuse_while_busy
 def reset_boundary():
     boundary.reset()
@@ -1403,6 +1569,7 @@ def get_position():
 
 
 @app.route("/calibrate/start", methods=["POST"])
+@idempotent
 @refuse_while_busy
 def calibrate_start():
     """Home the arm and park the pen just above the sand at the home point."""
@@ -1417,6 +1584,7 @@ def calibrate_start():
 
 
 @app.route("/calibrate/jog", methods=["POST"])
+@idempotent
 @refuse_while_busy
 def calibrate_jog():
     """
@@ -1440,6 +1608,7 @@ def calibrate_jog():
 
 
 @app.route("/calibrate/record", methods=["POST"])
+@idempotent
 def calibrate_record():
     """Record the pen's current XY as the next rim point."""
     if freenove.pos is None:
@@ -1449,6 +1618,7 @@ def calibrate_record():
 
 
 @app.route("/calibrate/undo", methods=["POST"])
+@idempotent
 def calibrate_undo():
     if calibration_points:
         calibration_points.pop()
@@ -1456,6 +1626,7 @@ def calibrate_undo():
 
 
 @app.route("/calibrate/save", methods=["POST"])
+@idempotent
 def calibrate_save():
     """Save recorded rim points as the new (smoothed) boundary."""
     if len(calibration_points) < 5:
@@ -1465,6 +1636,7 @@ def calibrate_save():
 
 
 @app.route("/calibrate/finish", methods=["POST"])
+@idempotent
 @refuse_while_busy
 def calibrate_finish():
     """Lift clear of the rim, tuck the arm up and unload the motors."""

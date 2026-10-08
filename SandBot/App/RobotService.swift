@@ -19,7 +19,7 @@ protocol RobotServiceProtocol {
     func sendText(_ text: String, fontSize: Int, fontName: String, threshold: Int, gauss: Int, sharpen: Int, penUpHeight: Int, layout: DrawingLayout) async throws -> String
     func fetchImagePreview(_ image: UIImage, threshold: Int, gauss: Int, sharpen: Int, layout: DrawingLayout) async throws -> PreviewStrokes
     func fetchAutoSettings(_ image: UIImage) async throws -> ImageSettings
-    func fetchJobStatus(jobId: String) async throws -> JobStatus
+    func fetchJob(jobId: String) async throws -> JobReport
     func connectArm() async throws
     func loadMotors() async throws
     func relaxMotors() async throws
@@ -41,10 +41,7 @@ final class RobotService {
 // MARK: - Live implementation
 
 final class LiveRobotService: RobotServiceProtocol {
-    fileprivate var baseURL: String {
-        let host = UserDefaults.standard.string(forKey: "robotHost") ?? "100.95.15.84:8080"
-        return "http://\(host)"
-    }
+    fileprivate var baseURL: String { RobotLink.baseURL }
 
     // MARK: Status
 
@@ -52,7 +49,8 @@ final class LiveRobotService: RobotServiceProtocol {
         let url = URL(string: "\(baseURL)/status")!
         var request = URLRequest(url: url)
         request.timeoutInterval = 5
-        let (data, _) = try await URLSession.shared.data(for: request)
+        // Only "offline" once it's been gone longer than a Wi-Fi hop.
+        let (data, _) = try await RobotLink.send(request, patience: 15)
         return try JSONDecoder().decode(RobotStatusResponse.self, from: data)
     }
 
@@ -62,7 +60,6 @@ final class LiveRobotService: RobotServiceProtocol {
         let url = URL(string: "\(baseURL)/draw")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = 90
 
         let boundary = UUID().uuidString
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
@@ -88,14 +85,7 @@ final class LiveRobotService: RobotServiceProtocol {
 
         request.httpBody = body
 
-        let (data, _) = try await URLSession.shared.data(for: request)
-        let response = try JSONDecoder().decode(DrawResponse.self, from: data)
-
-        if let error = response.error {
-            throw RobotError.serverError(error)
-        }
-
-        return response.jobId ?? ""
+        return try await postDrawing(request)
     }
 
     // MARK: Send text for drawing
@@ -104,7 +94,6 @@ final class LiveRobotService: RobotServiceProtocol {
         let url = URL(string: "\(baseURL)/draw")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = 90
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
         let payload: [String: Any] = [
@@ -119,14 +108,29 @@ final class LiveRobotService: RobotServiceProtocol {
 
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
-        let (data, _) = try await URLSession.shared.data(for: request)
-        let response = try JSONDecoder().decode(DrawResponse.self, from: data)
+        return try await postDrawing(request)
+    }
 
-        if let error = response.error {
-            throw RobotError.serverError(error)
+    /// Hand a drawing to the robot: check it's answering, send, and resend
+    /// (same request ID, so it's only ever drawn once) until it acknowledges.
+    /// The bridge acknowledges as soon as the drawing has arrived, so no
+    /// answer within 10 s means the Wi-Fi dropped, not that it's busy.
+    private func postDrawing(_ request: URLRequest) async throws -> String {
+        var request = request
+        request.timeoutInterval = 10
+        let giveUp = Date().addingTimeInterval(45)
+        do {
+            guard try await RobotLink.waitForRobot(until: giveUp) else { throw RobotError.unreachable }
+            let (data, _) = try await RobotLink.send(request, patience: giveUp.timeIntervalSinceNow)
+            let response = try JSONDecoder().decode(DrawResponse.self, from: data)
+            if let error = response.error {
+                throw RobotError.serverError(error)
+            }
+            guard let jobId = response.jobId, !jobId.isEmpty else { throw RobotError.invalidResponse }
+            return jobId
+        } catch let error as URLError where error.code != .cancelled {
+            throw RobotError.unreachable
         }
-
-        return response.jobId ?? ""
     }
 
     // MARK: Preview contours (image only)
@@ -154,7 +158,7 @@ final class LiveRobotService: RobotServiceProtocol {
         body.append("--\(boundary)--\r\n".data(using: .utf8)!)
         request.httpBody = body
 
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let (data, _) = try await RobotLink.send(request)
         return try JSONDecoder().decode(PreviewStrokes.self, from: data)
     }
 
@@ -171,7 +175,7 @@ final class LiveRobotService: RobotServiceProtocol {
                              data: try Self.uploadJPEG(image), boundary: boundary)
         body.append("--\(boundary)--\r\n".data(using: .utf8)!)
         request.httpBody = body
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let (data, _) = try await RobotLink.send(request)
         return try JSONDecoder().decode(ImageSettings.self, from: data)
     }
 
@@ -196,12 +200,12 @@ final class LiveRobotService: RobotServiceProtocol {
 
     // MARK: Job status
 
-    func fetchJobStatus(jobId: String) async throws -> JobStatus {
-        let url = URL(string: "\(baseURL)/job/\(jobId)")!
-        let (data, http) = try await URLSession.shared.data(from: url)
-        if (http as? HTTPURLResponse)?.statusCode == 404 { throw RobotError.jobNotFound }
-        let response = try JSONDecoder().decode(JobStatusResponse.self, from: data)
-        return response.status
+    func fetchJob(jobId: String) async throws -> JobReport {
+        var request = URLRequest(url: URL(string: "\(baseURL)/job/\(jobId)")!)
+        request.timeoutInterval = 10
+        let (data, http) = try await RobotLink.send(request)
+        if http.statusCode == 404 { throw RobotError.jobNotFound }
+        return try JSONDecoder().decode(JobReport.self, from: data)
     }
 
     // MARK: Arm control
@@ -209,33 +213,97 @@ final class LiveRobotService: RobotServiceProtocol {
     func connectArm() async throws {
         var request = URLRequest(url: URL(string: "\(baseURL)/connect")!)
         request.httpMethod = "POST"
-        _ = try await URLSession.shared.data(for: request)
+        request.timeoutInterval = 15
+        _ = try await RobotLink.send(request)
     }
 
     func loadMotors() async throws {
         var request = URLRequest(url: URL(string: "\(baseURL)/load")!)
         request.httpMethod = "POST"
-        _ = try await URLSession.shared.data(for: request)
+        request.timeoutInterval = 15
+        _ = try await RobotLink.send(request)
     }
 
     func relaxMotors() async throws {
         var request = URLRequest(url: URL(string: "\(baseURL)/relax")!)
         request.httpMethod = "POST"
-        _ = try await URLSession.shared.data(for: request)
+        request.timeoutInterval = 15
+        _ = try await RobotLink.send(request)
     }
 
     func stopArm() async throws {
         var request = URLRequest(url: URL(string: "\(baseURL)/stop")!)
         request.httpMethod = "POST"
-        _ = try await URLSession.shared.data(for: request)
+        request.timeoutInterval = 15
+        _ = try await RobotLink.send(request)
     }
 
     func sendMoveCommand(position: String) async throws {
         var request = URLRequest(url: URL(string: "\(baseURL)/move")!)
         request.httpMethod = "POST"
+        request.timeoutInterval = 15
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(["position": position])
-        _ = try await URLSession.shared.data(for: request)
+        _ = try await RobotLink.send(request)
+    }
+}
+
+// MARK: - Riding out Wi-Fi drops
+
+/// Every call to the bridge goes through here. The Pi drops off Wi-Fi for a
+/// second or two whenever it hops between the router's two radios (every
+/// 5–10 minutes), so a request that gets no answer waits until the robot
+/// answers a ping again and is sent again, quietly, for up to `patience`
+/// seconds. Each POST carries an X-Request-ID that stays the same on every
+/// resend, and the bridge answers a repeat with its first reply, so nothing
+/// (a drawing, a jog) ever happens twice.
+enum RobotLink {
+    static var baseURL: String {
+        let host = UserDefaults.standard.string(forKey: "robotHost") ?? "100.95.15.84:8080"
+        return "http://\(host)"
+    }
+
+    static func send(_ request: URLRequest, patience: TimeInterval = 30) async throws -> (Data, HTTPURLResponse) {
+        var request = request
+        if request.httpMethod == "POST", request.value(forHTTPHeaderField: "X-Request-ID") == nil {
+            request.setValue(UUID().uuidString, forHTTPHeaderField: "X-Request-ID")
+        }
+        let giveUp = Date().addingTimeInterval(patience)
+        while true {
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse else { throw RobotError.invalidResponse }
+                return (data, http)
+            } catch let error as URLError where isDropout(error) {
+                guard try await waitForRobot(until: giveUp) else { throw error }
+            }
+        }
+    }
+
+    /// Ping until the robot answers. False if it still hasn't by `giveUp`.
+    static func waitForRobot(until giveUp: Date) async throws -> Bool {
+        var pause: TimeInterval = 0.5
+        while true {
+            if await ping() { return true }
+            guard Date().addingTimeInterval(pause) < giveUp else { return false }
+            try await Task.sleep(nanoseconds: UInt64(pause * 1_000_000_000))
+            pause = min(pause * 2, 2)
+        }
+    }
+
+    /// One quick "are you there?" (/status answers instantly).
+    static func ping() async -> Bool {
+        var request = URLRequest(url: URL(string: "\(baseURL)/status")!)
+        request.timeoutInterval = 3
+        guard let (_, response) = try? await URLSession.shared.data(for: request) else { return false }
+        return (response as? HTTPURLResponse)?.statusCode == 200
+    }
+
+    /// A hop can surface as almost any network error (a reply cut off halfway
+    /// is "cannot parse response"), and resending is always safe, so only
+    /// cancellation and a malformed address are final.
+    private static func isDropout(_ error: URLError) -> Bool {
+        ![.cancelled, .badURL, .unsupportedURL].contains(error.code)
     }
 }
 
@@ -245,7 +313,7 @@ extension LiveRobotService {
     func fetchBoundary() async throws -> PitBoundary {
         var request = URLRequest(url: URL(string: "\(baseURL)/boundary")!)
         request.timeoutInterval = 5
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let (data, _) = try await RobotLink.send(request, patience: 15)
         return try JSONDecoder().decode(PitBoundary.self, from: data)
     }
 
@@ -259,7 +327,7 @@ extension LiveRobotService {
             "text": text, "font_name": fontName, "font_size": fontSize, "format": "json",
         ].merging(layout.payload) { _, new in new }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let (data, _) = try await RobotLink.send(request)
         return try JSONDecoder().decode(PreviewStrokes.self, from: data)
     }
 }
@@ -267,8 +335,10 @@ extension LiveRobotService {
 extension LiveRobotService {
     /// Photo the Pi took from the camera view position after the drawing finished.
     func fetchJobPhoto(jobId: String) async throws -> Data? {
-        let (data, response) = try await URLSession.shared.data(from: URL(string: "\(baseURL)/job/\(jobId)/photo")!)
-        guard (response as? HTTPURLResponse)?.statusCode == 200, UIImage(data: data) != nil else { return nil }
+        var request = URLRequest(url: URL(string: "\(baseURL)/job/\(jobId)/photo")!)
+        request.timeoutInterval = 15
+        let (data, response) = try await RobotLink.send(request)
+        guard response.statusCode == 200, UIImage(data: data) != nil else { return nil }
         return data
     }
 }
@@ -298,13 +368,16 @@ struct DrawResponse: Codable {
     }
 }
 
-private struct JobStatusResponse: Codable {
-    let jobId: String
-    let status: JobStatus
-    enum CodingKeys: String, CodingKey {
-        case jobId = "job_id"
-        case status
+/// A drawing job as the bridge reports it (GET /job/<id>).
+struct JobReport: Decodable {
+    enum Stage: String, Decodable {
+        case processing   // working out the moves for the picture or text
+        case queued       // about to start (older bridges, briefly)
+        case drawing, completed, failed
+        case rejected     // can't be drawn; `error` says why (too detailed, nothing inside the pit, …)
     }
+    let status: Stage
+    let error: String?
 }
 
 // MARK: - Errors
@@ -314,6 +387,7 @@ enum RobotError: LocalizedError {
     case invalidResponse
     case serverError(String)
     case jobNotFound
+    case unreachable
 
     var errorDescription: String? {
         switch self {
@@ -321,6 +395,7 @@ enum RobotError: LocalizedError {
         case .invalidResponse: return "Invalid response from robot"
         case .serverError(let msg): return msg
         case .jobNotFound: return "The robot no longer knows this job (it restarted)."
+        case .unreachable: return "Couldn't reach the robot. Check that it's on and online, then try again."
         }
     }
 }
